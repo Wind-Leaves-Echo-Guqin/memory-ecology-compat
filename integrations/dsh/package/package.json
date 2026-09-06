@@ -1,0 +1,13 @@
+{
+  "name": "eco-note-dsh",
+  "version": "0.1.0",
+  "description": "记忆生态·兼容版 dsh 适配器：报错时按根因注入相关经验（provideContext）+ 原生经验查询工具（registerTool）。Python 核心零侵入，fail-open。",
+  "type": "commonjs",
+  "main": "index.js",
+  "dsh": {
+    "extension": {
+      "permissions": {}
+    }
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+config.yaml
+memories/
+experiences/
+*.db
+.env
+.dsh_inject_state.json
