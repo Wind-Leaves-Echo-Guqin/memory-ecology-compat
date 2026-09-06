@@ -27,7 +27,10 @@ from pathlib import Path
 from lib.config import hermes_root
 from lib import llm as _llm
 from lib.fs import atomic_write
-import eco_note_error_query as errq  # v2.2.0：GOLD 判定线的重放检索器
+try:
+    import eco_note_error_query as errq  # v2.2.0 GOLD 重放检索器（经验笔记本线提供）
+except ImportError:  # 纯记忆线（无经验笔记本）缺省——GOLD 判定线记 SKIP，不阻塞其余维度
+    errq = None
 
 HERMES = hermes_root()
 DETAIL_DIR = HERMES / "memories" / "detail"
@@ -230,33 +233,39 @@ def main() -> int:
                   if g.get("error") and (args.experiences / f"{g.get('entry_id', '')}.md").exists()]
     gold_hits = 0
     replay_failed = 0
-    try:
-        errq.eq.EXP_DIR = args.experiences  # rank 内部经 eco_note_query 读条目（旋钮在 eq 侧）
-        for g in replayable:
-            try:
-                ids = [h["path"] for h in errq.rank(g["error"], top=5)]
-                if not ids:
-                    replay_failed += 1  # R2：零关键词/空结果=重放失败，与检索 miss 区分
-                elif g["entry_id"] in ids:
-                    gold_hits += 1
-            except Exception:
-                replay_failed += 1
-                continue
-    except Exception as ex:
-        report.append(f"GOLD 重放异常: {ex}")
-        replay_failed = len(replayable)
-    if len(replayable) >= GOLD_MIN_EVENTS and replay_failed > len(replayable) // 2:
+    if errq is None:
+        gold_status = "SKIP"  # 纯记忆线：无经验笔记本检索器，GOLD 判定线不适用
         gold_rate = 0.0
-        gold_status = "INSUFFICIENT"  # R2：重放失败过半=口径/基础设施问题，不误判检索质量
-    elif len(replayable) >= GOLD_MIN_EVENTS:
-        gold_rate = gold_hits / len(replayable)
-        gold_status = "PASS" if gold_rate >= GOLD_TOP5_RATE else "FAIL"
     else:
-        gold_rate = 0.0
-        gold_status = "INSUFFICIENT"
+        try:
+            errq.eq.EXP_DIR = args.experiences  # rank 内部经 eco_note_query 读条目（旋钮在 eq 侧）
+            for g in replayable:
+                try:
+                    ids = [h["path"] for h in errq.rank(g["error"], top=5)]
+                    if not ids:
+                        replay_failed += 1  # R2：零关键词/空结果=重放失败，与检索 miss 区分
+                    elif g["entry_id"] in ids:
+                        gold_hits += 1
+                except Exception:
+                    replay_failed += 1
+                    continue
+        except Exception as ex:
+            report.append(f"GOLD 重放异常: {ex}")
+            replay_failed = len(replayable)
+        if len(replayable) >= GOLD_MIN_EVENTS and replay_failed > len(replayable) // 2:
+            gold_rate = 0.0
+            gold_status = "INSUFFICIENT"  # R2：重放失败过半=口径/基础设施问题，不误判检索质量
+        elif len(replayable) >= GOLD_MIN_EVENTS:
+            gold_rate = gold_hits / len(replayable)
+            gold_status = "PASS" if gold_rate >= GOLD_TOP5_RATE else "FAIL"
+        else:
+            gold_rate = 0.0
+            gold_status = "INSUFFICIENT"
     scores["GOLD"] = (gold_status, f"top5 相关率 {gold_rate:.0%}（{gold_hits}/{len(replayable)}，需 ≥60%）")
-    report.append(f"GOLD top5 相关率: {'✅' if gold_status == 'PASS' else '⏳' if gold_status == 'INSUFFICIENT' else '❌'} "
-                  f"{gold_hits}/{len(replayable)} = {gold_rate:.0%}（需 ≥60%；可重放 <{GOLD_MIN_EVENTS} 记 INSUFFICIENT）")
+    _g = "✅" if gold_status == "PASS" else "❌" if gold_status == "FAIL" else "⏳"
+    _gn = ("不适用（纯记忆线）" if gold_status == "SKIP"
+           else f"{gold_hits}/{len(replayable)} = {gold_rate:.0%}（需 ≥60%；可重放 <{GOLD_MIN_EVENTS} 记 INSUFFICIENT）")
+    report.append(f"GOLD top5 相关率: {_g} {_gn}")
 
     # ---- 判定线汇总 ----
     fails = [k for k, (st, _) in scores.items() if st == "FAIL"]
