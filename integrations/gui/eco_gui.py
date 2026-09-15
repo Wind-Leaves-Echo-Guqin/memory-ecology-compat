@@ -39,7 +39,8 @@ import runner      # noqa: E402
 
 STATIC = HERE / "static"
 _MIME = {".html": "text/html", ".css": "text/css", ".js": "text/javascript",
-         ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon"}
+         ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon",
+         ".woff2": "font/woff2", ".json": "application/json"}
 
 GUI_LOG_DIR = HERE
 ERROR_LOG = GUI_LOG_DIR / "gui_error.log"
@@ -435,20 +436,24 @@ def main():
     ap.add_argument("--scripts-dir", help="检索脚本目录（默认数据根 scripts/）")
     ap.add_argument("--no-browser", action="store_true", help="不自动开浏览器/窗口")
     ap.add_argument("--no-window", action="store_true", help="禁用 pywebview 窗口")
+    ap.add_argument("--tray", action="store_true",
+                    help="托盘常驻模式（需 pystray+Pillow；缺失时给出安装指引并正常起服务）")
     a = ap.parse_args()
     # 端口策略：默认端口上已有本服务 → 只开窗口连过去；
     # 显式 --port 时维持旧语义（端口占用自动上扫，可并存多实例）
     if a.port == 8788 and _is_our_server(8788):
         url = "http://127.0.0.1:8788"
         print(f"观测舱已在运行 → 直接开窗口 {url}")
+        tray = _start_tray(8788, url) if a.tray else None
         if a.no_browser:
+            if tray is None:
+                return 0
+            try:
+                threading.Event().wait()   # 托盘常驻：保持进程存活
+            except KeyboardInterrupt:
+                pass
             return 0
-        try:
-            import webview
-            webview.create_window("记忆生态 · 观测舱", url, width=1280, height=860)
-            webview.start()
-        except ImportError:
-            webbrowser.open(url)
+        _open_frontend(url, tray)
         return 0
 
     collector.set_root(a.root, a.scripts_dir)
@@ -467,20 +472,42 @@ def main():
     print(f"  检索CLI   {'就绪' if m['search_cli_ready'] else '未找到（检索不可用，其余正常）'}")
     print("  写通道    POST /api/action/*（仅本机回环 · 全走生产 CLI · 闸门拦截）")
     print("  纪律      单写入方不受影响 · 异常落 gui_error.log · Ctrl+C 退出")
+    tray = _start_tray(port, url) if a.tray else None
     if a.no_browser:
         pass
     else:
-        try:
-            import webview  # pywebview 可选增强（未装自动跳过）
-            webview.create_window("记忆生态 · 观测舱", url, width=1280, height=860)
-            webview.start()
-            return
-        except ImportError:
-            webbrowser.open(url)
+        _open_frontend(url, tray)
     try:
         threading.Event().wait()
     except KeyboardInterrupt:
         print("\n已退出。")
+
+
+def _start_tray(port: int, url: str):
+    """托盘常驻（T16，可选）：pystray 缺失时只提示，不影响服务。返回 Tray 或 None。"""
+    try:
+        from tray import Tray
+    except ImportError as e:
+        print(f"⚠ 托盘模块不可用（{e}）——继续以普通模式运行")
+        return None
+    import threading as _th
+    t = Tray(port=port, url=url, on_quit=lambda: os._exit(0))
+    _th.Thread(target=t.run, daemon=True).start()
+    return t
+
+
+def _open_frontend(url: str, tray=None):
+    """开前端：pywebview 原生窗口（可选）→ 系统浏览器兜底。--tray 时窗口交给托盘管理。"""
+    try:
+        import webview  # pywebview 可选增强（未装自动跳过）
+        win = webview.create_window("记忆生态 · 观测舱", url, width=1280, height=860)
+        if tray is not None:
+            tray.window = win
+        webview.start()
+        return
+    except ImportError:
+        if tray is None:
+            webbrowser.open(url)
 
 
 if __name__ == "__main__":

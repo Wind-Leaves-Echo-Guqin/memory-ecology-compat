@@ -118,8 +118,46 @@ var Bell = {
       badge.classList.add('hidden');
     }
     Bell.items = items;
+    Bell._notify(items);
     var panel = document.getElementById('bell-panel');
     if (!panel.classList.contains('hidden')) Bell.renderPanel();
+  },
+
+  /* ── 桌面通知（T7/B2，仅浏览器端；后台标签页才推送，前台不打扰） ── */
+  _sig: null,
+  _seen: null,
+  _notify: function (items) {
+    try {
+      if (typeof Notification === 'undefined') return;
+      if (window.__ecoDesktop) return;                       // 桌面窗口不推送
+      var sig = items.map(function (i) { return i.sev + '|' + i.text; }).join('\n');
+      if (this._sig === null) { this._sig = sig; this._markSeen(items); return; }  // 首次只记基线
+      if (sig === this._sig) return;
+      this._sig = sig;
+      var seen = this._seen || {};
+      var fresh = items.filter(function (i) { return !seen[i.sev + '|' + i.text]; });
+      this._markSeen(items);
+      if (!fresh.length) return;
+      if (!document.hidden) return;                          // 页面前台时静默（只更新铃铛）
+      var self = this;
+      var send = function () {
+        try {
+          var bad = fresh.filter(function (x) { return x.sev === 'bad'; });
+          var head = bad.length ? '⚠ 新增严重告警 ' + bad.length + ' 条' : '新增告警 ' + fresh.length + ' 条';
+          var n = new Notification('记忆生态 · 观测舱', {
+            body: head + '：' + fresh[0].text.slice(0, 90), tag: 'eco-bell',
+          });
+          n.onclick = function () { try { window.focus(); } catch (e) {} };
+        } catch (e) { /* 通知失败不影响铃铛 */ }
+      };
+      if (Notification.permission === 'granted') send();
+      else if (Notification.permission === 'default') Notification.requestPermission().then(function (p) { if (p === 'granted') send(); });
+    } catch (e) { /* fail-open */ }
+  },
+  _markSeen: function (items) {
+    var m = {};
+    items.forEach(function (i) { m[i.sev + '|' + i.text] = 1; });
+    this._seen = m;
   },
 
   toggle: function () {

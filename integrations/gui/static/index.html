@@ -11,7 +11,7 @@
 
 <!-- ── 左侧导航栏 ── -->
 <nav id="nav">
-  <div class="brand"><span class="brand-dot"></span>记忆生态<span class="brand-sub">观测舱 v0.3</span></div>
+  <div class="brand"><span class="brand-dot"></span>记忆生态<span class="brand-sub">观测舱 v0.3.2</span></div>
   <a data-view="dashboard" class="on"><i>◉</i>驾驶舱</a>
   <a data-view="memories"><i>▦</i>记忆库</a>
   <a data-view="experiences"><i>✦</i>经验笔记本</a>
@@ -55,8 +55,15 @@
     <span id="sb-version">…</span><span class="sep">|</span>
     <span id="sb-root" class="ellipsis">…</span>
     <span class="sb-right">
-      <button id="guide-btn" class="linklike" title="重看新手引导">？引导</button>
-      <button id="mute-reset" class="linklike" title="清空所有「不再提醒」记忆">提醒重置</button>
+      <span class="anim-ctl" id="anim-ctl" title="动画强度：轻度=仅淡入淡出；中度=过渡+度量+图表；满载=全部动效">
+        <button data-lv="low" title="轻度">轻</button><button data-lv="medium" title="中度">中</button><button data-lv="full" title="满载">满</button>
+      </span>
+      <span class="export-ctl html-only" id="export-ctl" title="导出当前视图数据">
+        <button data-exp="json" title="下载 JSON 文件">JSON</button><button data-exp="md" title="复制 Markdown 到剪贴板">MD</button><button data-exp="text" title="复制纯文本">文本</button>
+      </span>
+      <button id="cruise-btn" class="linklike" title="全屏巡航（Ctrl+Shift+F）：轮播九视图 / 固定驾驶舱大屏">巡航</button>
+      <button id="diag-btn" class="linklike" title="复制诊断信息（版本/数据根/cron/水位/最近动作）">诊断</button>
+      <button id="guide-btn" class="linklike" title="重看新手引导 / 清空「不再提醒」">？引导</button>
       <span class="fontsize-ctl"><button id="font-minus" title="全局字号减小">A-</button><button id="font-plus" title="全局字号增大">A+</button></span>
       <span id="sb-snapshot">数据截至 …</span>
       <i id="patrol-dot" class="patrol-dot" title="巡检：后台数据有新变化"></i>
@@ -81,6 +88,12 @@
 <!-- ── 新手引导遮罩 ── -->
 <div id="guide-mask" class="hidden"></div>
 
+<!-- ── 快捷键参考浮层（?） ── -->
+<div id="kbd-mask" class="hidden"></div>
+
+<!-- ── 命令面板遮罩（Ctrl+K） ── -->
+<div id="cmd-mask" class="hidden"></div>
+
 <div id="toast" class="hidden"></div>
 
 <script src="/static/js/polyfill.js"></script>
@@ -89,6 +102,7 @@
 <script src="/static/js/bell.js"></script>
 <script src="/static/js/viz/force.js"></script>
 <script src="/static/js/viz/charts.js"></script>
+<script src="/static/js/viz/particles.js"></script>
 <script src="/static/js/views/dashboard.js"></script>
 <script src="/static/js/views/memories.js"></script>
 <script src="/static/js/views/experiences.js"></script>
@@ -99,6 +113,9 @@
 <script src="/static/js/views/health.js"></script>
 <script src="/static/js/views/actions.js"></script>
 <script src="/static/js/views/firstaid.js"></script>
+<script src="/static/js/shortcuts.js"></script>
+<script src="/static/js/palette.js"></script>
+<script src="/static/js/cruise.js"></script>
 <script src="/static/js/core.js"></script>
 </body>
 </html>

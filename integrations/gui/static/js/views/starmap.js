@@ -172,8 +172,15 @@ function mountForce() {
     popWrap.parentElement.appendChild(lg);
   }
 
-  // ── 仿真 ──
-  SM.sim = new ForceSim();
+  // ── 仿真（T10：D3-force 同级物理，参数见 viz/force.js） ──
+  const vb = svg.viewBox.baseVal;
+  const reduce = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  SM.sim = new ForceSim({
+    width: vb.width, height: vb.height,
+    charge: -300, linkDistance: 120, collisionPad: 10,   // 需求指定参数
+    alphaDecay: 0.02,
+    instant: reduce || S.animLevel === 'low',            // 低动效：同步收敛，不打帧
+  });
   SM.sim.setGraph(nodes, links);
   SM.sim.onTick = renderPositions;
   renderPositions();
@@ -258,8 +265,7 @@ function bindStarInteractions(svg, d) {
       const n = SM.byId[g.dataset.name];
       if (n && !n.cand) {
         drag = { node: n, moved: false };
-        n.fixed = true;
-        SM.sim.reheat();
+        SM.sim.dragStart(n);
         e.preventDefault();
         return;
       }
@@ -275,15 +281,15 @@ function bindStarInteractions(svg, d) {
       applyView();
     } else if (drag.node) {
       const p = svgPoint(e);
-      drag.node.x = p.x; drag.node.y = p.y;
+      SM.sim.dragMove(drag.node, p.x, p.y);
       drag.moved = true;
-      SM.sim.reheat();
     }
   };
   const up = () => {
     if (drag && drag.node) {
-      // 拖拽结束保持钉住（用户定位语义）；再点一次节点可取消钉住
-      if (!drag.moved) drag.node.fixed = false;
+      // 松手即释放：节点带惯性滑行并被弹簧拉回，全图重新收敛（拖拽惯性）
+      if (drag.moved) SM.sim.dragEnd(drag.node);
+      else drag.node.fixed = false;
     }
     drag = null;
   };

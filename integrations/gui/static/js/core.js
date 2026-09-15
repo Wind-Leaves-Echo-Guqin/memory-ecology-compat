@@ -11,6 +11,9 @@ const S = {
   fontStep: +(localStorage.getItem('eco_font_step') || 1),   // 0/1/2/3 → 12/13/14/15
   starred: JSON.parse(localStorage.getItem('eco_star') || '[]'),
   searchMode: 'note',
+  animLevel: localStorage.getItem('eco_anim_level') || 'full',   // low | medium | full
+  pollInterval: +(localStorage.getItem('eco_poll_interval') || 30), // 秒；0=关
+  desktop: false,
   patrolStamp: null,
   focus: null,
   expFilters: { type: '', status: '', sort: 'created', page: 1 },
@@ -166,21 +169,46 @@ function gotoSkill(name) {
 }
 
 /* ── 路由（RENDER 注册表在 polyfill.js 声明，视图模块向其挂载） ── */
+function prefersReduced() {
+  try { return typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches; }
+  catch (e) { return false; }
+}
+let _routeSeq = 0;
 async function route() {
   const view = (location.hash.replace(/^#\//, '') || 'dashboard');
+  const seq = ++_routeSeq;
   S.view = view;
   $$('#nav a').forEach(a => a.classList.toggle('on', a.dataset.view === view));
   const v = $('#view');
+  // 切走时停掉星图仿真循环（否则每次进入星图都会叠加一个 rAF 循环）
+  try { if (typeof SM === 'object' && SM && SM.sim) SM.sim.stop(); } catch (e) {}
+  const animate = S.animLevel !== 'low' && !prefersReduced();
+  // 退出：旧内容淡出上移（内容先上屏，动效只作过渡，可被后续导航打断）
+  if (animate) {
+    v.classList.add('view-out');
+    await sleep(120);
+    if (seq !== _routeSeq) { v.classList.remove('view-out'); return; }   // 已被新导航接管
+    v.classList.remove('view-out');
+  }
+  v.classList.remove('view-anim');
   v.innerHTML = '<div class="loading">正在读取生态快照…</div>';
   try {
     await (RENDER[view] || RENDER.dashboard)(v);
-    v.classList.remove('view-anim'); void v.offsetWidth; v.classList.add('view-anim');
+    if (seq !== _routeSeq) return;
+    if (animate) {
+      // 双帧提交：确保"无动画类"状态先落屏，再加动画类，消除整块重绘闪烁
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    }
+    v.classList.add('view-anim');
+    animateMetrics(v, view);
   } catch (e) {
+    if (seq !== _routeSeq) return;
     v.innerHTML = `<div class="empty">读取失败：${esc(e.message)}<br>fail-open：检索/接口失败不影响其余视图，可点右上角 ⟳ 重试</div>`;
   }
   if (S.focus) {
     const f = S.focus; S.focus = null;
     await sleep(150);
+    if (seq !== _routeSeq) return;
     if (f.kind === 'detail') await openDetailDrawer(f.slug);
     else if (f.kind === 'exp') await openExpDrawer(f.id);
     else if (f.kind === 'skill') focusSkill(f.name);
@@ -189,10 +217,14 @@ async function route() {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 window.addEventListener('hashchange', route);
 
-/* ── 检索（三模式 + 复制） ── */
-async function doSearch() {
-  const q = $('#search-input').value.trim();
+/* ── 检索（三模式 + 复制 + 历史） ── */
+const SEARCH_HIST_MAX = 20;
+async function doSearch(qArg) {
+  const inp = $('#search-input');
+  const q = (qArg != null ? String(qArg) : inp.value).trim();
   if (!q) return;
+  if (qArg != null) inp.value = q;
+  SearchHist.push(q);
   const panel = $('#search-panel');
   panel.classList.remove('hidden');
   panel.innerHTML = '<div class="faint" style="padding:8px">检索中…（subprocess 调用只读 CLI）</div>';
@@ -234,6 +266,204 @@ async function doSearch() {
 }
 function closeSearch() { $('#search-panel').classList.add('hidden'); }
 
+/* ── 搜索历史（T7/A3）：localStorage 持久化，最多 20 条，最新在前 ── */
+const SearchHist = {
+  key: 'eco_search_hist',
+  max: SEARCH_HIST_MAX,
+  list() {
+    try { return JSON.parse(localStorage.getItem(this.key) || '[]'); } catch (e) { return []; }
+  },
+  push(q) {
+    q = String(q || '').trim();
+    if (!q) return;
+    const ls = this.list().filter(x => x !== q);
+    ls.unshift(q);
+    try { localStorage.setItem(this.key, JSON.stringify(ls.slice(0, this.max))); } catch (e) {}
+  },
+  clear() { try { localStorage.removeItem(this.key); } catch (e) {} },
+  /* 空焦点时展示最近 5 条；有输入则不打扰 */
+  show() {
+    const ls = this.list().slice(0, 5);
+    if (!ls.length) return;
+    const panel = $('#search-panel');
+    panel.innerHTML = '<div class="sr-head">最近检索 <a id="hist-clear" style="float:right">清空</a></div>' +
+      ls.map((q, i) => `<div class="sr-hit" data-hist="${i}"><span class="sr-t">${esc(q)}</span></div>`).join('');
+    panel.classList.remove('hidden');
+    $$('[data-hist]', panel).forEach(el => el.onclick = () => { doSearch(ls[+el.dataset.hist]); });
+    const c = $('#hist-clear');
+    if (c) c.onclick = (e) => { e.stopPropagation(); this.clear(); closeSearch(); toast('搜索历史已清空', true); };
+  },
+  /* ↑ 回溯：把上一条历史填进输入框（不自动执行，便于二次编辑） */
+  recall(dir) {
+    const ls = this.list();
+    if (!ls.length) return false;
+    this._i = this._i == null ? -1 : this._i;
+    this._i += dir;
+    if (this._i < 0) this._i = ls.length - 1;
+    if (this._i >= ls.length) this._i = 0;
+    const inp = $('#search-input');
+    inp.value = ls[this._i];
+    return true;
+  },
+};
+
+/* ── 一键导出（T7/B1）：json 下载 / md 与 text 走剪贴板 ── */
+function exportView(format) {
+  const rows = collectViewData();
+  if (!rows.length) { toast('当前视图暂无可导出的数据', false); return; }
+  const stamp = new Date().toLocaleString('sv-SE').slice(0, 16).replace(/[ :]/g, '-');
+  const name = VIEW_TITLE[S.view] || S.view;
+  if (format === 'json') {
+    const payload = { view: S.view, view_name: name, exported: new Date().toISOString(), data: rows };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `eco-${S.view}-${stamp}.json`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    toast('已导出 JSON 文件', true);
+    return;
+  }
+  if (format === 'md') {
+    let mdText = `# 记忆生态 · ${name}\n\n导出时间：${new Date().toLocaleString()}　${($('#sb-snapshot') ? $('#sb-snapshot').textContent : '数据截至 —').replace(/^数据截至\s*/, '数据截至 ')}\n\n`;
+    mdText += '| 字段 | 值 |\n|---|---|\n' + rows.map(r => `| ${r.k} | ${String(r.v).replace(/\|/g, '\\|')} |`).join('\n');
+    ecoCopy(mdText, '已复制 Markdown 到剪贴板');
+    return;
+  }
+  const text = `记忆生态 · ${name}（${new Date().toLocaleString()}）\n` +
+    rows.map(r => `${r.k}：${r.v}`).join('\n');
+  ecoCopy(text, '已复制纯文本到剪贴板');
+}
+
+/* 采集当前视图可见的关键数据（卡片标题 + 指标/表格行），供导出使用 */
+function collectViewData() {
+  const out = [];
+  const v = $('#view');
+  if (!v) return out;
+  const head = $('.vh', v);
+  if (head) out.push({ k: '视图', v: head.textContent.trim().split('\n')[0] });
+  $$('.card', v).forEach(card => {
+    const h = $('h3', card);
+    const title = h ? h.textContent.trim().split('\n')[0] : '卡片';
+    $$('.chip, .ring-info, .water .legend > *', card).forEach(el => {
+      const t = el.textContent.replace(/\s+/g, ' ').trim();
+      if (t) out.push({ k: title + ' · ' + t.split(' ')[0], v: t });
+    });
+    $$('tbody tr', card).forEach((tr, i) => {
+      if (i > 60) return;
+      const cells = $$('td', tr).map(td => td.textContent.replace(/\s+/g, ' ').trim());
+      if (cells.length) out.push({ k: title + ' #' + (i + 1), v: cells.join(' | ') });
+    });
+  });
+  return out;
+}
+
+/* ── 诊断包（T7/B3）：一键复制可读诊断段（不含敏感路径外内容） ── */
+async function copyDiagnostic() {
+  const lines = [];
+  const meta = await EcoApi.get('/api/meta').catch(() => null);
+  const ov = await EcoApi.get('/api/overview').catch(() => null);
+  lines.push('记忆生态 · 观测舱诊断包');
+  lines.push('生成时间：' + new Date().toLocaleString());
+  lines.push('界面版本：' + (document.querySelector('.brand-sub') ? document.querySelector('.brand-sub').textContent : '—') +
+    ' · 运行环境：' + (S.desktop ? '桌面窗口(pywebview)' : '浏览器'));
+  if (meta) {
+    lines.push('生态版本：' + meta.version + ' · 评分模型：' + meta.score_model);
+    lines.push('数据根：' + meta.root + '（存在=' + meta.root_exists + '）');
+    lines.push('脚本目录：' + (meta.scripts_dir || '—'));
+    lines.push('检索 CLI：' + (meta.search_cli_ready ? '就绪' : '未找到'));
+    lines.push('数据快照：' + meta.snapshot + ' · 单写入方今日运行：' + (meta.writer_today_ran ? '是' : '否'));
+    const locks = Object.keys(meta.locks || {});
+    lines.push('锁文件：' + (locks.length ? locks.map(k => k + '(' + (meta.locks[k].age_hours != null ? meta.locks[k].age_hours.toFixed(1) + 'h' : '?') + ')').join(', ') : '无'));
+  }
+  if (ov) {
+    const wm = ov.watermark || {};
+    lines.push('记忆水位：' + wm.chars + ' / ' + wm.quota + (wm.chars > wm.quota ? '（越线）' : '（正常）'));
+    const cron = ov.cron || {};
+    lines.push('cron：运行 ' + (cron.total != null ? cron.total : '?') + ' · 近7天失败 ' + ((cron.recent_fails || []).length));
+    (cron.recent_fails || []).slice(0, 3).forEach(f => lines.push('  ⚠ ' + f.job + ' ×' + f.n));
+  }
+  try {
+    const log = await EcoApi.get('/api/action_log');
+    (log.entries || log.log || []).slice(0, 3).forEach(e =>
+      lines.push('动作：' + (e.ts || e.time || '') + ' ' + (e.action || '') + ' ' + (e.ok === false ? '失败' : '成功')));
+  } catch (e) { /* fail-open */ }
+  const bad = (Bell.items || []).filter(i => i.sev === 'bad');
+  lines.push('当前告警：' + (Bell.items || []).length + ' 条（其中严重 ' + bad.length + ' 条）');
+  (Bell.items || []).slice(0, 5).forEach(i => lines.push('  • ' + i.text));
+  ecoCopy(lines.join('\n'), '诊断信息已复制（可粘贴给维护者）');
+}
+
+/* ── 数字动态度量（T11）：旧值→新值计数递增，600ms easeOutCubic ── */
+function animateValue(el, from, to, duration, format) {
+  if (!el) return;
+  const fmt = format || (v => String(Math.round(v)));
+  if (S.animLevel === 'low' || prefersReduced() || !isFinite(from) || !isFinite(to) || from === to) {
+    el.textContent = fmt(to);
+    return;
+  }
+  const t0 = performance.now();
+  const dur = duration || 600;
+  function tick(t) {
+    const p = Math.min(1, (t - t0) / dur);
+    const e = 1 - Math.pow(1 - p, 3);
+    el.textContent = fmt(from + (to - from) * e);
+    if (p < 1) requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+}
+
+/* 视图渲染后扫描数值位（评分环 / 计数徽章），与上次同位置比较后做递增动画 */
+const _metricCache = {};
+function animateMetrics(root, viewKey) {
+  if (S.animLevel === 'low' || prefersReduced()) return;
+  $$('.ring-info b, .chip b', root).forEach((el, i) => {
+    const raw = el.textContent.trim();
+    if (!/^-?\d+(\.\d+)?$/.test(raw)) return;      // 含单位（如 10/20）不做计数动画
+    const key = viewKey + '#' + i;
+    const to = parseFloat(raw);
+    const prev = _metricCache[key];
+    _metricCache[key] = to;
+    if (prev == null || prev === to) return;        // 首次渲染直接显示，不倒数
+    animateValue(el, prev, to, 600);
+  });
+}
+
+/* ── 自动轮询（T13）：只在浏览器端；有变化才重渲染；无变化不闪 ── */
+let _pollTimer = 0;
+function startPoll() {
+  stopPoll();
+  const sec = S.pollInterval;
+  if (!sec || S.desktop) return;          // 桌面端保持手动刷新（省资源）
+  _pollTimer = setInterval(pollOnce, Math.max(5, sec) * 1000);
+}
+function stopPoll() { if (_pollTimer) clearInterval(_pollTimer); _pollTimer = 0; }
+function setPollInterval(sec) {
+  S.pollInterval = sec;
+  localStorage.setItem('eco_poll_interval', String(sec));
+  startPoll();
+  toast(sec ? ('自动轮询：每 ' + sec + ' 秒') : '自动轮询已关闭', true);
+}
+/* 浮层打开时不重渲染（避免打断阅读/操作），只更新状态栏与铃铛 */
+function uiBusy() {
+  const ids = ['drawer', 'gate-modal', 'kbd-mask', 'cmd-mask', 'bell-panel'];
+  return ids.some(id => { const el = $('#' + id); return el && !el.classList.contains('hidden'); });
+}
+async function pollOnce() {
+  try {
+    const d = await EcoApi.get('/api/overview');
+    const stamp = String(d.snapshot || (d.watermark && d.watermark.chars) || '');
+    if (!stamp || stamp === String(S.patrolStamp)) return;   // 无变化：不动 DOM（不闪）
+    S.patrolStamp = stamp;
+    const dot = $('#patrol-dot');
+    if (dot) { dot.classList.add('live'); setTimeout(() => dot.classList.remove('live'), 2600); }
+    S.cache = {};                                            // 数据变了才失效缓存
+    Bell.refresh();                                           // 后台也推送告警/通知
+    if (!uiBusy() && !Cruise.active) { loadStatus(); route(); }
+    else loadStatus();
+  } catch (e) { /* fail-open：轮询失败不影响使用 */ }
+}
+
 /* ── 状态栏 ── */
 async function loadStatus() {
   try {
@@ -252,34 +482,65 @@ async function loadStatus() {
   } catch (e) { /* fail-open */ }
 }
 
-/* ── 色板（五浅冷精修 + 第6套深空大屏） ── */
+/* ── 色板（三套精修：雾白 / 青瓷 / 深空大屏） ── */
+const VIEW_TITLE = {
+  dashboard: '驾驶舱', memories: '记忆库', experiences: '经验笔记本', starmap: '技能星图',
+  lineage: '血缘谱系', candidates: '候选孵化台', timeline: '时间线', health: '体检评测',
+  actions: '动作日志', firstaid: '急救模式',
+};
 const PALETTES = [
-  ['a', '雾白', '#0e7490'], ['b', '冷蓝灰', '#35639e'], ['c', '青瓷', '#3a7d6d'],
-  ['d', '黛紫', '#5e56ad'], ['e', '玄墨', '#41474f'], ['f', '深空大屏', '#22d3ee'],
+  ['a', '雾白', '#0e7490'], ['c', '青瓷', '#39786a'], ['f', '深空大屏', '#22d3ee'],
 ];
+const PALETTE_ALIAS = { b: 'a', d: 'a', e: 'a' };   // v0.3.2 收敛：旧色板并入雾白
+function setPalette(k) {
+  S.palette = k;
+  localStorage.setItem('eco_palette', k);
+  initPalette();
+}
 function initPalette() {
+  if (PALETTE_ALIAS[S.palette]) S.palette = PALETTE_ALIAS[S.palette];
+  if (!PALETTES.some(p => p[0] === S.palette)) S.palette = 'a';
   document.documentElement.dataset.palette = S.palette;
-  $('#palette-dots').innerHTML = PALETTES.map(([k, n, c]) =>
-    `<i data-p="${k}" title="${n}" style="background:${c}" class="${S.palette === k ? 'on' : ''}"></i>`).join('');
-  $$('#palette-dots i').forEach(i => i.onclick = () => {
-    S.palette = i.dataset.p;
-    localStorage.setItem('eco_palette', S.palette);
-    initPalette();
-  });
+  localStorage.setItem('eco_palette', S.palette);
+  const dots = $('#palette-dots');
+  if (dots) {
+    dots.innerHTML = PALETTES.map(([k, n, c]) =>
+      `<i data-p="${k}" title="${n}" style="background:${c}" class="${S.palette === k ? 'on' : ''}"></i>`).join('');
+    $$('#palette-dots i').forEach(i => i.onclick = () => setPalette(i.dataset.p));
+  }
+  if (typeof Particles !== 'undefined') Particles.sync();   // 深色板才开粒子层
 }
 
-/* ── 全局字号（12/13/14/15 四档，localStorage 持久化） ── */
-const FONT_SIZES = [12, 13, 14, 15];
+/* ── 动画强度（T12）：low 仅淡入淡出 / medium 过渡+度量+图表 / full 全部 ── */
+function setAnimLevel(lv, silent) {
+  if (['low', 'medium', 'full'].indexOf(lv) < 0) lv = 'full';
+  S.animLevel = lv;
+  localStorage.setItem('eco_anim_level', lv);
+  document.documentElement.dataset.anim = lv;
+  $$('#anim-ctl button').forEach(b => b.classList.toggle('on', b.dataset.lv === lv));
+  if (typeof Particles !== 'undefined') Particles.sync();
+  if (silent) return;
+  const zh = { low: '轻度（仅淡入淡出）', medium: '中度（过渡+度量+图表）', full: '满载（全部动效）' };
+  toast('动画强度：' + zh[lv], true);
+}
+
+/* ── 全局字号（12.5/13.5/14.5/15.5 四档，默认 13.5 兼顾屏显密度与可读性） ── */
+const FONT_SIZES = [12.5, 13.5, 14.5, 15.5];
 function applyFont() {
   document.body.style.fontSize = FONT_SIZES[S.fontStep] + 'px';
   localStorage.setItem('eco_font_step', String(S.fontStep));
 }
 
-/* ── 新手引导（三步遮罩，可跳过可重看） ── */
+/* ── 新手引导（五步遮罩，可跳过可重看） ── */
 const GUIDE_STEPS = [
   { title: '第 1 步 · 看健康', body: '驾驶舱 10 秒扫完：体检评分环、记忆水位条、四道门账本与运行证据。<br>红色告警条 = 需要你处理的事（如 cron 失败、记忆越线）。' },
   { title: '第 2 步 · 处理告警', body: '顶栏 🔔 铃铛聚合全部告警，每条可复制、可跳转处理。<br>记忆越线时驾驶舱会出现「立即挤出」按钮（有红色警告与确认闸门）。' },
   { title: '第 3 步 · 执行动作', body: '写操作（挤出/整合/采纳/孵化/体检…）都走确认闸门：<br>弹窗说明影响与回滚 → 高风险需勾选「我已知晓风险」→ 可勾「不再提醒」。<br>每次执行都记录在「动作日志」视图。' },
+  { title: '第 4 步 · 快捷键一览', body: '按 <b>g</b> 再按视图首字母跳转：<b>g d</b> 驾驶舱 · <b>g m</b> 记忆库 · <b>g s</b> 技能星图 …<br>' +
+      '按 <b>?</b> 随时唤出完整快捷键表；<b>/</b> 聚焦搜索框；<b>r</b> 刷新；<b>Esc</b> 关闭浮层。' },
+  { title: '第 5 步 · 更多便利功能', body: '<b>Ctrl+K</b> 命令面板：输入"急/候选/导出"即可跳转或执行。<br>' +
+      '状态栏可切换<b>动画强度</b>（轻/中/满载）与<b>色板</b>；顶栏可<b>导出当前视图</b>（JSON/Markdown/文本）。<br>' +
+      '浏览器端还支持<b>桌面通知</b>（后台时推送 cron 失败/水位越线）。' },
 ];
 function showGuide(step) {
   step = step || 0;
@@ -312,7 +573,12 @@ function initSearch() {
     toast(names[S.searchMode] || S.searchMode, true);
   });
   $('#search-go').onclick = doSearch;
-  $('#search-input').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+  $('#search-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') { doSearch(); return; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); SearchHist.recall(-1); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); SearchHist.recall(1); }
+  });
+  $('#search-input').addEventListener('focus', e => { if (!e.target.value.trim()) SearchHist.show(); });
   $('#search-input').addEventListener('input', e => {
     const v = e.target.value;
     if (/traceback|exception|error:|错误|失败|raise\s+\w+|^(import|from)\s.+\n.*error/im.test(v) && S.searchMode !== 'error') {
@@ -333,6 +599,8 @@ function initSearch() {
       closeDrawer(); closeSearch();
       Gate.close();
       $('#bell-panel').classList.add('hidden');
+      if (typeof CmdPalette !== 'undefined') CmdPalette.close();
+      if (typeof Shortcuts !== 'undefined') Shortcuts.closeHelp();
     }
   });
 }
@@ -343,13 +611,19 @@ function initNav() {
   $('#drawer-close').onclick = closeDrawer;
   $('#drawer-mask').onclick = closeDrawer;
   $('#firstaid-btn').onclick = () => goto('firstaid');
-  $('#mute-reset').onclick = () => {
+  const muteBtn = $('#mute-reset');   // v0.3.2：状态栏减负后此按钮移到命令面板，保留兼容
+  if (muteBtn) muteBtn.onclick = () => {
     const n = Gate.resetAll();
     toast(n ? `已重置 ${n} 类动作的「不再提醒」` : '没有已静默的提醒', true);
   };
   $('#font-minus').onclick = () => { S.fontStep = Math.max(0, S.fontStep - 1); applyFont(); };
   $('#font-plus').onclick = () => { S.fontStep = Math.min(3, S.fontStep + 1); applyFont(); };
   $('#guide-btn').onclick = () => showGuide(0);
+  $$('#anim-ctl button').forEach(b => b.onclick = () => setAnimLevel(b.dataset.lv));
+  $$('#export-ctl button').forEach(b => b.onclick = () => exportView(b.dataset.exp));
+  $('#diag-btn').onclick = () => copyDiagnostic();
+  const cruiseBtn = $('#cruise-btn');
+  if (cruiseBtn) cruiseBtn.onclick = () => { if (typeof Cruise !== 'undefined') Cruise.toggle(); else toast('巡航模式将在本版本稍后提供', false); };
   document.addEventListener('click', e => {
     const gd = e.target.closest('[data-goto-detail]');
     if (gd) { gotoDetail(gd.dataset.gotoDetail); return; }
@@ -360,9 +634,22 @@ function initNav() {
   });
 }
 
+/* ── 运行环境探测：pywebview 桌面窗口 vs 系统浏览器（T3） ──
+   桌面端 = 凝练版（保留核心功能，动画朴素，省资源）；
+   浏览器端 = 全量版（含仅浏览器便利功能与高质量动效）。 */
+function initEnv() {
+  const ua = navigator.userAgent || '';
+  S.desktop = /pywebview/i.test(ua) || window.__ecoDesktop === true;
+  window.__ecoDesktop = S.desktop;   // 供其他模块（如 bell 通知）判定
+  if (S.desktop) document.documentElement.dataset.desktop = 'true';
+}
+
 /* ── 启动 ── */
+initEnv();
+try { Particles.init(); } catch (e) { /* 旧内核无 canvas 时静默降级 */ }
 initPalette();
 applyFont();
+setAnimLevel(S.animLevel, true);   // 应用持久化的动画强度（静默，不打扰启动）
 initSearch();
 initNav();
 loadStatus();
@@ -370,4 +657,4 @@ Bell.init();
 try { ecoKernelCheck(); } catch (e) {}
 route();
 if (!localStorage.getItem('eco_guide_done')) setTimeout(() => showGuide(0), 600);
-setInterval(loadStatus, 30000);
+startPoll();
