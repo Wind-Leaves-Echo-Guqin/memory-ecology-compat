@@ -1,5 +1,14 @@
 # Memory Ecology Compat · 版本
 
+- **v2.2.1**（2026-09-15）
+- 集成层新增：观测舱 GUI v0.3（`integrations/gui/`，可操作驾驶舱——只读观测 +
+  走确认闸门的写操作，全部转交核心 CLI；含急救箱与启动器三入口：cmd / .pyw /
+  install_desktop.py 桌面生成器）
+- 启动器加固：仓库内 cmd 全部相对路径 + 解释器探测（pythonw → pyw → 报错可读）；
+  急救箱修复路径拼接 bug（双位置均不可用）并补失败检测；敏感词扫描扩展名新增
+  .cmd/.html/.css/.pyw
+- 核心脚本（src/memory_ecology）零改动，与上游 v2.2.0 功能一致
+
 - **v2.2.0**（2026-09-06）
 - 阶段 C 评测验收（迭代策略 §3）：伪 gold 构建器（eco_eval_gold.py，gold=实际被使用过的记忆）
   + eco_eval 两条新判定线（INJ 注入超限 ≤5 次/30 天、GOLD top5 相关率 ≥60%）+ --gate 纯规则门禁模式

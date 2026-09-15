@@ -733,7 +733,15 @@ def build_report():
     # v1.1：趋势观测——append 记录本次评分（保留最近 20 条，同模型才对比）
     try:
         history.append({"score": score, "time": now.strftime("%Y-%m-%d %H:%M"), "model": "v3"})
-        SCORE_HISTORY.write_text(json.dumps(history[-20:], ensure_ascii=False), encoding="utf-8")
+        # 同分钟多次运行只保留最后一条（分钟粒度趋势图同一 x 只该有一个点）
+        deduped = {}
+        for h in history:
+            if isinstance(h, dict) and "time" in h:
+                deduped[h["time"]] = h
+            else:
+                deduped[("__raw__", len(deduped))] = h
+        history = list(deduped.values())[-20:]
+        SCORE_HISTORY.write_text(json.dumps(history, ensure_ascii=False), encoding="utf-8")
     except OSError:
         pass
     return "\n".join(L)

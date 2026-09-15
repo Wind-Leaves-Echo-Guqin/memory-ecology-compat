@@ -5,7 +5,8 @@
 复用同一套记忆生命周期治理与经验笔记本。
 
 > 派生声明：本项目为原 memory-ecology（Hermes 单宿主版）的兼容衍生线，独立仓库、独立演进；
-> 自 v2.1.2 起**两线功能完全一致、版本号同步**（当前 v2.2.0），本线只多出「多宿主化」这一层。
+> 自 v2.1.2 起**两线核心功能完全一致、版本号同步**（当前 v2.2.1），本线只多出「多宿主化 +
+> 观测舱 GUI」这一集成层（核心脚本零改动）。
 
 ## English TL;DR
 
@@ -27,6 +28,7 @@ multi-host layer. MIT licensed.
 | **可移植核心** | 任意能 spawn Python 子进程的宿主 | `src/memory_ecology`（四道门 + 经验笔记本 + 评测门禁）零宿主依赖，CLI / 脚本 / MCP 封装均可直接调用 |
 | **Hermes 适配层** | 上游 [memory-ecology](https://github.com/Wind-Leaves-Echo-Guqin/memory-ecology) 的宿主（参考实现全套） | `integrations/hermes/`：state.db 会话增量提取、pre_llm_call 报错注入 hook、cron 健康告警、基因库快照 |
 | **dsh 适配层** | dsh（DeepSeek Harness EAC）Extension SDK | `integrations/dsh/`：provideContext 报错根因注入（只读 + fail-open）+ `eco_note_query` / `eco_note_error_query` 原生只读工具 |
+| **观测舱 GUI** | 人类（本机浏览器 / pywebview 原生窗口） | `integrations/gui/`：本地可视化驾驶舱（只读观测 + 走确认闸门的写操作），数据根同上，仅绑 127.0.0.1 |
 | **共享数据根** | 多宿主并存 | 多宿主经 `MEMORY_ECOLOGY_ROOT` 指向同一条数据根即可共享记忆与经验；**单写入方纪律**保证四道门只有一个调度器 |
 
 **适配新宿主**：照 `integrations/` 现有模式写薄壳（每回合 hook → subprocess 调检索 CLI → 拼注入文本），
@@ -51,6 +53,7 @@ src/memory_ecology/     可移植核心（Python ≥3.10，零宿主依赖）
   └── test_*.py（fixture 隔离测试）
 integrations/hermes/    Hermes 参考集成层（state.db/cron 耦合件，适配器参考实现）
 integrations/dsh/       dsh 适配器（Extension SDK 插件：报错根因注入 + 原生查询工具）
+integrations/gui/       观测舱 GUI（可选：人类宿主适配器，本地可视化驾驶舱）
 ```
 
 ## 快速开始
@@ -80,6 +83,23 @@ python eco_health_check.py
 
 `integrations/hermes/` 为参考实现（会话提取/注入 hook/cron 健康告警等），
 展示如何把核心接到"有会话库和调度器的宿主"上。其他宿主照此模式写适配器。
+
+### 4) 观测舱 GUI（可选，人类宿主）
+
+```bash
+# 方式一：命令行启动（默认 127.0.0.1:8788，自动开窗口）
+python integrations/gui/eco_gui.py
+# 方式二：双击 integrations/gui/启动生态观测舱.cmd（相对路径，clone 到哪都能用）
+#        或 启动生态观测舱.pyw（pythonw 直启，无控制台黑框）
+# 桌面双击入口：一次性生成指向本机安装位置的快捷 cmd
+python integrations/gui/install_desktop.py
+# GUI 服务异常时的自救：双击 integrations/gui/生态急救箱.cmd（自检→修复→重启→开窗）
+```
+
+数据根默认自动探测（`MEMORY_ECOLOGY_ROOT` 可覆盖，与上面各宿主一致）；
+检索 CLI 在发布树自动定位到 `src/memory_ecology/`。纯离线、仅绑 127.0.0.1、
+零第三方前端依赖；写操作全部走确认闸门并转交核心 CLI 执行。
+Hermes 专属动作（cron 重跑等）在未安装 Hermes 的机器上会降级为"可复制命令"。
 
 ## 多宿主纪律（重要）
 
