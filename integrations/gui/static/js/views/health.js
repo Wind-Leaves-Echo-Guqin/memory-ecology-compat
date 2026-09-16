@@ -10,6 +10,7 @@ RENDER.health = async function (v) {
   const meta = await cached('meta', 15000, () => EcoApi.get('/api/meta'));
   const T = S.healthTab;
   const archives = d.archives || [];
+  const curScore = (d.report.body.match(/总分[^\d]{0,6}(\d{1,3})/) || [])[1] || null;
   const mtime = (d.report.mtime || '').slice(0, 16).replace('T', ' ');
   const ageH = d.report.mtime ? ((Date.now() - new Date(d.report.mtime).getTime()) / 3600000).toFixed(1) : null;
   v.innerHTML = `
@@ -101,6 +102,16 @@ RENDER.health = async function (v) {
     const ev = d.evals.find(e => e.name === el.dataset.eval);
     if (ev) openDrawer(`<div class="vh">评测报告 <small>${esc(ev.name)}</small></div><div class="md">${md(ev.body)}</div>`);
   });
+  // 评分环：变化时闪一次（上次分数缓存在 localStorage；差异明显才闪，避免每次进入都闪）
+  const ring = $('.ring', v);
+  if (ring) {
+    const last = +(localStorage.getItem('eco_last_score') || 0);
+    if (last && Math.abs(last - curScore) >= 3) {
+      ring.classList.add('flash');
+      setTimeout(() => ring.classList.remove('flash'), 1000);
+    }
+    if (curScore) { try { localStorage.setItem('eco_last_score', String(curScore)); } catch (e) { } }
+  }
 };
 
 /* Markdown 渲染 + P0 行红色告警条样式 */

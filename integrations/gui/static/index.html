@@ -9,18 +9,18 @@
 </head>
 <body>
 
-<!-- ── 左侧导航栏 ── -->
+<!-- ── 左侧导航栏（图标由 viz/icons.js 注入内联 SVG：字重/基线统一，不再用 unicode 符号） ── -->
 <nav id="nav">
-  <div class="brand"><span class="brand-dot"></span>记忆生态<span class="brand-sub">观测舱 v0.3.2</span></div>
-  <a data-view="dashboard" class="on"><i>◉</i>驾驶舱</a>
-  <a data-view="memories"><i>▦</i>记忆库</a>
-  <a data-view="experiences"><i>✦</i>经验笔记本</a>
-  <a data-view="starmap"><i>✳</i>技能星图</a>
-  <a data-view="lineage"><i>⑃</i>血缘谱系</a>
-  <a data-view="candidates"><i>✶</i>候选孵化台</a>
-  <a data-view="timeline"><i>≡</i>时间线</a>
-  <a data-view="health"><i>♡</i>体检评测</a>
-  <a data-view="actions"><i>⚙</i>动作日志</a>
+  <div class="brand"><span class="brand-dot"></span>记忆生态<span class="brand-sub">观测舱 v0.3.3</span></div>
+  <a data-view="dashboard" class="on" title="驾驶舱"><i data-ico="dashboard"></i><span>驾驶舱</span></a>
+  <a data-view="memories" title="记忆库"><i data-ico="memories"></i><span>记忆库</span></a>
+  <a data-view="experiences" title="经验笔记本"><i data-ico="experiences"></i><span>经验笔记本</span></a>
+  <a data-view="starmap" title="技能星图"><i data-ico="starmap"></i><span>技能星图</span></a>
+  <a data-view="lineage" title="血缘谱系"><i data-ico="lineage"></i><span>血缘谱系</span></a>
+  <a data-view="candidates" title="候选孵化台"><i data-ico="candidates"></i><span>候选孵化台</span></a>
+  <a data-view="timeline" title="时间线"><i data-ico="timeline"></i><span>时间线</span></a>
+  <a data-view="health" title="体检评测"><i data-ico="health"></i><span>体检评测</span></a>
+  <a data-view="actions" title="动作日志"><i data-ico="actions"></i><span>动作日志</span></a>
   <div class="nav-foot">
     <div class="nav-note">可操作驾驶舱<br>写操作全走确认闸门<br>单写入方不受影响</div>
   </div>
@@ -37,24 +37,25 @@
       </div>
       <input id="search-input" type="text" autocomplete="off"
              placeholder="检索经验 / 粘贴 Traceback / 生态级检索…（Enter 执行，粘贴报错自动切报错模式）">
-      <button id="search-go" title="检索">⌕</button>
+      <button id="search-go" title="检索" data-ico="search"></button>
       <div id="search-panel" class="hidden"></div>
     </div>
     <div class="topbar-right">
-      <button id="bell-btn" class="ghost-btn" title="全局告警铃铛（聚合 cron 失败/记忆越线/悬空引用/报告P0/候选）">🔔<i id="bell-badge" class="badge hidden">0</i></button>
-      <button id="firstaid-btn" class="ghost-btn" title="急救箱：深度自检 + 一键修复">🧰 急救箱</button>
+      <button id="bell-btn" class="ghost-btn" title="全局告警铃铛（聚合 cron 失败/记忆越线/悬空引用/报告P0/候选）"><i data-ico="bell"></i><i id="bell-badge" class="badge hidden">0</i></button>
+      <button id="firstaid-btn" class="ghost-btn" title="急救箱：深度自检 + 一键修复"><i data-ico="firstaid"></i><span class="btn-txt">急救箱</span></button>
       <div class="palette-dots" id="palette-dots" title="色板（换肤=换 token，语义色恒定）"></div>
-      <button id="refresh-btn" class="ghost-btn" title="重新读取快照">⟳ 刷新</button>
+      <button id="refresh-btn" class="ghost-btn" title="重新读取快照"><i data-ico="refresh"></i><span class="btn-txt">刷新</span></button>
     </div>
   </header>
 
-  <main id="view"><div class="loading">正在��取生态快照…</div></main>
+  <main id="view"><div class="loading">正在读取生态快照…</div></main>
 
   <footer id="statusbar">
     <span id="sb-writer">…</span><span class="sep">|</span>
     <span id="sb-version">…</span><span class="sep">|</span>
     <span id="sb-root" class="ellipsis">…</span>
     <span class="sb-right">
+      <span id="fps-badge" class="fps-badge hidden" title="实测帧率（星图/粒子运行时采样）">— fps</span>
       <span class="anim-ctl" id="anim-ctl" title="动画强度：轻度=仅淡入淡出；中度=过渡+度量+图表；满载=全部动效">
         <button data-lv="low" title="轻度">轻</button><button data-lv="medium" title="中度">中</button><button data-lv="full" title="满载">满</button>
       </span>
@@ -74,7 +75,7 @@
 <!-- ── 详情抽屉 ── -->
 <div id="drawer-mask" class="hidden"></div>
 <aside id="drawer" class="hidden">
-  <button id="drawer-close" title="关闭（Esc）">✕</button>
+  <button id="drawer-close" title="关闭（Esc）" data-ico="close"></button>
   <div id="drawer-body"></div>
 </aside>
 
@@ -100,7 +101,10 @@
 <script src="/static/js/api.js"></script>
 <script src="/static/js/gate.js"></script>
 <script src="/static/js/bell.js"></script>
+<script src="/static/js/viz/anim.js"></script>
+<script src="/static/js/viz/icons.js"></script>
 <script src="/static/js/viz/force.js"></script>
+<script src="/static/js/viz/gl3d.js"></script>
 <script src="/static/js/viz/charts.js"></script>
 <script src="/static/js/viz/particles.js"></script>
 <script src="/static/js/views/dashboard.js"></script>

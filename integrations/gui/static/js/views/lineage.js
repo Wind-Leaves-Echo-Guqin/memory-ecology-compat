@@ -1,9 +1,13 @@
 /* ============================================================
-   views/lineage.js — 血缘谱系 v0.3.2（重做）
-   · 「链路故事」卡：每条血缘链一行叙事（A →（繁殖自）B →（合并入）C）
-   · 边表格修复：数据直接来自 /api/lineage edges，每行可点开详情抽屉
-   · 候选区 = 三源聚合（与孵化台同源），不再依赖单一 skills/.candidates
-   · 节点/边点击 → 详情抽屉（frontmatter 证据 + 跳星图 + 孵化）
+   views/lineage.js — 血缘谱系 v0.3.3（T3：真正画出谱系图）
+   · 真实谱系图：evolved_from（父→子，分叉）与 merged_into（子→父，汇聚）
+     手写分层布局（按代际最长路径排层，零依赖）：
+       演化边：亲代(左) → 子代(右)，紫
+       合并边：子代(左) → 合并目标(右)，琥珀
+       两类都向左→右读，方向箭头 + 流动光点 = 语义方向
+   · 链路上光点流动（纯 CSS dashoffset，零 rAF）；悬停高亮该链并播一次流动
+   · 新记录与上次渲染 diff，逐条"生长"出现（.ln-anim + 错峰延迟）
+   · 文本链路故事卡保留（信息密度高，与图互为伴生视图）
    ============================================================ */
 'use strict';
 
@@ -16,15 +20,8 @@ RENDER.lineage = async function (v) {
   const pathByName = {};
   sk.skills.forEach(s => { pathByName[s.name] = s.path; });
 
-  // —— 链路归组：把边合成"链"（同一 parent 的 evolved 链为一组故事） ——
-  const chains = [];
-  const usedChild = {};
-  d.edges.forEach(e => { if (e.kind === 'evolved_from' && !usedChild[e.child]) { usedChild[e.child] = 1; } });
   const evolveEdges = d.edges.filter(e => e.kind === 'evolved_from');
   const mergeEdges = d.edges.filter(e => e.kind === 'merged_into');
-  // 链 = 按 parent 分组
-  const byParent = {};
-  evolveEdges.forEach(e => (byParent[e.parent] = byParent[e.parent] || []).push(e));
 
   v.innerHTML = `
     <div class="vh">血缘谱系 <small>谁从谁繁殖而来（evolved_from）· 谁合并进了谁（merged_into）</small></div>
@@ -35,13 +32,20 @@ RENDER.lineage = async function (v) {
       <span class="faint">孵化 = 声明一个新技能（名字+亲代+动机），先进入观察期，再由门③蒸馏转正</span>
     </div>
 
+    <div class="card"><h3>谱系图 <small>横向分层：左=亲代/来源 · 右=子代/去向 · 紫=繁殖 · 琥珀=合并</small></h3>
+      ${d.edges.length
+        ? `<div class="ln-wrap">${lineageSvg(d.edges, infoByName)}<div id="ln-tip" class="ln-tip hidden"></div></div>`
+        : Icons.empty('lineage', '还没有任何血缘记录',
+            '这不是坏了——<b>孵化一个新技能</b>（上方按钮）后，这里就会出现第一条繁殖边；<br>去重治理把旧技能并入新技能时，会出现合并边（汇聚）。')}
+    </div>
+
     <div class="card"><h3>繁殖链 <small>${evolveEdges.length} 条 · 每条 = 一段"谁演化为谁"的故事</small></h3>
       ${evolveEdges.length ? evolveEdges.map((e, i) => {
         const p = infoByName[e.parent], c = infoByName[e.child];
         return `<div class="chain-card" data-chain="${i}">
           <div class="chain-flow">
             <a class="chain-node" data-lname="${esc(e.parent)}" title="${esc(p ? p.desc : '')}">${esc(e.parent)}</a>
-            <span class="chain-arrow">— 繁殖出 →</span>
+            <span class="chain-arrow ev">— 繁殖出 →</span>
             <a class="chain-node" data-lname="${esc(e.child)}" title="${esc(c ? c.desc : '')}">${esc(e.child)}</a>
           </div>
           <div class="chain-meta faint">
@@ -53,14 +57,14 @@ RENDER.lineage = async function (v) {
             ${c ? ` · <a data-openmd="${esc(c.path)}">看子代 SKILL.md</a>` : ''}
           </div>
         </div>`;
-      }).join('') : '<div class="empty">还没有繁殖记录。这不是坏了——孵化一个新技能后，这里就会出现第一条链。<br>点上方「发起新的繁殖（孵化）」即可开始。</div>'}
+      }).join('') : '<div class="empty-ok">还没有繁殖记录——孵化一个技能后这里会出现第一条链。</div>'}
     </div>
 
     <div class="card"><h3>合并流 <small>${mergeEdges.length} 条 · 旧技能并入新技能后退役</small></h3>
       ${mergeEdges.length ? mergeEdges.map(e => `
         <div class="chain-card"><div class="chain-flow">
           <a class="chain-node" data-lname="${esc(e.child)}">${esc(e.child)}</a>
-          <span class="chain-arrow" style="color:var(--warn)">— 合并入 →</span>
+          <span class="chain-arrow mg">— 合并入 →</span>
           <a class="chain-node" data-lname="${esc(e.parent)}">${esc(e.parent)}</a>
         </div>
         <div class="chain-ops"><a data-edge-detail="merged_into|${esc(e.child)}|${esc(e.parent)}">合并详情</a></div>
@@ -86,7 +90,7 @@ RENDER.lineage = async function (v) {
           <td class="faint">${esc((it.mtime || '').slice(0, 16).replace('T', ' '))}</td>
           <td>${it.kind === 'skill' ? `<button class="ghost-btn act-btn" data-breed="${esc(it.name)}">孵化</button>` : it.kind === 'experience' ? '<span class="faint">→ 孵化台采纳</span>' : '<span class="faint">观察期</span>'}</td>
         </tr>`).join('')}</table>${(cand.items || []).length > 12 ? `<a data-goto="candidates">→ 还有 ${(cand.items || []).length - 12} 条，去孵化台看全部</a>` : ''}`
-        : '<div class="empty-ok">0 个候选。出现条件：孵化动作会写入技能候选；生态捕获会写入经验候选；门③会产生画像候选。<br>点上方「发起新的繁殖（孵化）」即可产生第一个技能候选。</div>'}
+        : '<div class="empty-ok">0 个候选。孵化动作写入技能候选；生态捕获写入经验候选；门③产生画像候选。</div>'}
     </div>`;
 
   $$('[data-act]', v).forEach(b => b.onclick = () => openBreedForm());
@@ -103,7 +107,200 @@ RENDER.lineage = async function (v) {
     const [kind, child, parent] = a.dataset.edgeDetail.split('|');
     openEdgeDetail(kind, child, parent, infoByName, pathByName);
   });
+  // 谱系图交互（悬停高亮链路 + 点击详情）与"新记录生长"入场
+  bindLineageGraph(v, d, infoByName, pathByName);
 };
+
+/* ═══════════════ 谱系图：分层布局 + SVG 渲染 ═══════════════ */
+function lineageSvg(edges, infoByName) {
+  const ns = 'http://www.w3.org/2000/svg';
+  // ── 建图：from → to（演化：亲代→子代；合并：子代→合并目标） ──
+  const nodes = {}, names = new Set();
+  edges.forEach(e => { names.add(e.child); names.add(e.parent); });
+  names.forEach(nm => nodes[nm] = { name: nm, g: 0, parents: [], children: [], kind: {} });
+  edges.forEach(e => {
+    const from = e.kind === 'evolved_from' ? e.parent : e.child;
+    const to = e.kind === 'evolved_from' ? e.child : e.parent;
+    nodes[from].children.push(to);
+    nodes[to].parents.push(from);
+    nodes[from].kind[to] = e.kind;
+    nodes[to].kind[from] = e.kind;
+  });
+  // ── 代际（最长路径；环保护） ──
+  const genOf = (nm, seen) => {
+    const nd = nodes[nm];
+    if (nd.g) return nd.g;
+    seen = seen || {};
+    if (seen[nm]) return 0;
+    seen[nm] = 1;
+    let g = 0;
+    nd.parents.forEach(p => { g = Math.max(g, 1 + genOf(p, seen)); });
+    nd.g = g;
+    return g;
+  };
+  names.forEach(nm => genOf(nm));
+  // ── 列内排序（子列按"父在列内的平均位置"排序 → 减少连线交叉；逐列处理，父列已定序） ──
+  const cols = [];
+  names.forEach(nm => { (cols[nodes[nm].g] = cols[nodes[nm].g] || []).push(nm); });
+  const idxInCol = {};
+  cols.forEach((col, gi) => {
+    const avgPar = nm => {
+      let s = 0, n = 0;
+      nodes[nm].parents.forEach(p => { const t = idxInCol[p]; if (t) { s += t.i; n++; } });
+      return n ? s / n : 0;
+    };
+    const indeg = nm => (infoByName[nm] ? infoByName[nm].indeg : 0);
+    col.sort(gi === 0
+      ? (a, b) => indeg(b) - indeg(a) || a.localeCompare(b)
+      : (a, b) => avgPar(a) - avgPar(b) || a.localeCompare(b));
+    col.forEach((nm, i) => { idxInCol[nm] = { g: gi, i: i }; });
+  });
+  // ── 坐标 ──
+  const colW = 176, boxW = 150, boxH = 44, gapV = 22, padX = 26, padY = 34;
+  const X = g => padX + g * colW;
+  const Y = i => padY + i * (boxH + gapV);
+  const W = padX + (cols.length - 1) * colW + boxW + padX;
+  const maxRows = Math.max(1, ...cols.map(c => c.length));
+  const H = padY + maxRows * (boxH + gapV) - gapV + padY;
+  // ── 边 ──
+  const defs = `<defs>
+    <marker id="ln-arw-ev" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="4.6" markerHeight="4.6" orient="auto-start-reverse">
+      <path d="M1.4 1.2 6.6 4 1.4 6.8Z" fill="#a98cf0"/></marker>
+    <marker id="ln-arw-mg" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="4.6" markerHeight="4.6" orient="auto-start-reverse">
+      <path d="M1.4 1.2 6.6 4 1.4 6.8Z" fill="#e0b23c"/></marker>
+  </defs>`;
+  let edgeSvg = '', flowSvg = '', nodeSvg = '';
+  let ei = 0;
+  edges.forEach(e => {
+    const from = e.kind === 'evolved_from' ? e.parent : e.child;
+    const to = e.kind === 'evolved_from' ? e.child : e.parent;
+    const f = idxInCol[from], t = idxInCol[to];
+    if (!f || !t) return;
+    const x1 = X(f.g) + boxW, y1 = Y(f.i) + boxH / 2;
+    const x2 = X(t.g), y2 = Y(t.i) + boxH / 2;
+    const cp = Math.max(24, (x2 - x1) * 0.55);
+    const d = 'M' + x1.toFixed(1) + ',' + y1.toFixed(1) +
+      ' C' + (x1 + cp).toFixed(1) + ',' + y1.toFixed(1) + ' ' + (x2 - cp).toFixed(1) + ',' + y2.toFixed(1) + ' ' + x2.toFixed(1) + ',' + y2.toFixed(1);
+    const ev = e.kind === 'evolved_from';
+    const col = ev ? '#a98cf0' : '#e0b23c';
+    edgeSvg += `<path class="ledge" data-ei="${ei}" data-from="${esc(from)}" data-to="${esc(to)}" data-kind="${e.kind}" d="${d}"
+      stroke="${col}" stroke-width="1.6" opacity="${ev ? '.75' : '.8'}" marker-end="url(#ln-arw-${ev ? 'ev' : 'mg'})"/>`;
+    flowSvg += `<path class="ledge-flow${ev ? '' : ' rev'}" data-ei="${ei}" data-from="${esc(from)}" data-to="${esc(to)}" d="${d}"
+      stroke="${ev ? '#d8c6ff' : '#ffd97a'}" stroke-width="2.2"/>`;
+    ei++;
+  });
+  // ── 节点 ──
+  let ni = 0;
+  names.forEach(nm => {
+    const t = idxInCol[nm];
+    if (!t) return;
+    const x = X(t.g), y = Y(t.i);
+    const s = infoByName[nm];
+    const cc = s && s.cat ? catHue(s.cat) : null;
+    nodeSvg += `<g class="lnode" data-lname="${esc(nm)}" transform="translate(${x},${y})">
+      <g class="ln-anim" style="animation-delay:${Math.min(ni * 55, 700)}ms">
+        ${cc ? `<rect class="lnbar" x="0" y="0" width="4" height="${boxH}" rx="2" fill="${cc}"/>` : ''}
+        <rect class="lnbox" width="${boxW}" height="${boxH}" rx="9"/>
+        <text class="lnname" x="${12 + (cc ? 0 : 6)}" y="18">${esc(nm.slice(0, 22))}</text>
+        <text class="lnmeta" x="${12 + (cc ? 0 : 6)}" y="32">${s ? `v${esc(s.version)} · ${esc(s.cat)} · 被引 ${s.indeg}` : '（已归档）'}</text>
+      </g></g>`;
+    ni++;
+  });
+  return `<svg id="lineage-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet"
+    style="min-width:${W}px; max-width:${Math.round(W * 1.45)}px; margin:0 auto">${defs}
+    <g class="lnedges">${edgeSvg}</g><g class="lnflow">${flowSvg}</g>${nodeSvg}</svg>`;
+}
+
+/* 类别 → 固定色相（与星图同源金角取色，浅色框内用中等饱和度） */
+function catHue(cat) {
+  let h = 0;
+  for (let i = 0; i < cat.length; i++) h = (h * 31 + cat.charCodeAt(i)) >>> 0;
+  const hue = 150 + (h % 246);
+  return 'hsl(' + hue + ',46%,52%)';
+}
+
+/* 谱系图交互绑定 + 新记录生长 */
+function bindLineageGraph(v, d, infoByName, pathByName) {
+  const svg = $('#lineage-svg', v);
+  if (!svg) return;
+  const tip = $('#ln-tip', v);
+  const box = $('.ln-wrap', v);
+  const highlight = (from, to, kind, on) => {
+    svg.classList.toggle('emph', on);
+    $$('.ledge', svg).forEach(p => {
+      p.classList.toggle('hot', on && p.dataset.ei === String(edgeIdx(from, to, kind)));
+      p.classList.toggle('dim', on && p.dataset.ei !== String(edgeIdx(from, to, kind)));
+    });
+    $$('.lnode', svg).forEach(g => g.classList.toggle('dim', on && g.dataset.lname !== from && g.dataset.lname !== to));
+    $$('.ledge-flow', svg).forEach(p => p.classList.toggle('on', on && p.dataset.ei === String(edgeIdx(from, to, kind))));
+  };
+  const edgeIdx = (from, to, kind) => {
+    // 与渲染顺序一致的索引（lineageSvg 里 edges.forEach 顺序）
+    let i = 0;
+    for (const e of d.edges) {
+      if (e.kind === kind &&
+        ((kind === 'evolved_from' && e.parent === from && e.child === to) ||
+          (kind === 'merged_into' && e.child === from && e.parent === to))) return i;
+      i++;
+    }
+    return -1;
+  };
+  const showTip = (x, y, html) => {
+    if (!tip || !box) return;
+    tip.innerHTML = html;
+    tip.classList.remove('hidden');
+    const r = box.getBoundingClientRect();
+    tip.style.left = Math.min(x, r.width - 250) + 'px';
+    tip.style.top = (y - 10) + 'px';
+  };
+  $$('.lnode', svg).forEach(g => {
+    g.addEventListener('mouseenter', e => {
+      const nm = g.dataset.lname;
+      const s = infoByName[nm];
+      svg.classList.toggle('emph', true);
+      $$('.lnode', svg).forEach(o => o.classList.toggle('dim', o !== g));
+      $$('.ledge', svg).forEach(p => {
+        p.classList.toggle('hot', p.dataset.from === nm || p.dataset.to === nm);
+        p.classList.toggle('dim', p.dataset.from !== nm && p.dataset.to !== nm);
+      });
+      if (tip && box) showTip(e.clientX - box.getBoundingClientRect().left, e.clientY - box.getBoundingClientRect().top,
+        '<b>' + esc(nm) + '</b> <span class="faint">' + esc(s ? (s.evolved_from ? '繁殖自 ' + s.evolved_from : s.merged_into ? '已合并入 ' + s.merged_into : '第一代') : '已归档') + '</span>');
+    });
+    g.addEventListener('mouseleave', () => {
+      svg.classList.remove('emph');
+      $$('.lnode', svg).forEach(o => o.classList.remove('dim'));
+      $$('.ledge', svg).forEach(p => p.classList.remove('hot', 'dim'));
+      if (tip) tip.classList.add('hidden');
+    });
+    g.addEventListener('click', () => openLineageNode(g.dataset.lname, infoByName, pathByName));
+  });
+  $$('.ledge', svg).forEach(p => {
+    p.addEventListener('mouseenter', e => {
+      const from = p.dataset.from, to = p.dataset.to, kind = p.dataset.kind;
+      highlight(from, to, kind, true);
+      const rel = kind === 'evolved_from'
+        ? '<b style="color:#a98cf0">' + esc(from) + '</b> 繁殖出 <b style="color:#a98cf0">' + esc(to) + '</b>'
+        : '<b style="color:#e0b23c">' + esc(to) + '</b> 合并入 <b style="color:#e0b23c">' + esc(from) + '</b>';
+      if (tip && box) showTip(e.clientX - box.getBoundingClientRect().left, e.clientY - box.getBoundingClientRect().top,
+        rel + '<br><span class="faint">点击看详情</span>');
+    });
+    p.addEventListener('mouseleave', () => {
+      svg.classList.remove('emph');
+      $$('.lnode', svg).forEach(o => o.classList.remove('dim'));
+      $$('.ledge', svg).forEach(x => x.classList.remove('hot', 'dim'));
+      if (tip) tip.classList.add('hidden');
+    });
+    p.addEventListener('click', e => {
+      e.stopPropagation();
+      // from/to 是"流向"，详情抽屉要的是（子代, 亲代/去向）
+      const kind = p.dataset.kind, from = p.dataset.from, to = p.dataset.to;
+      const child = kind === 'evolved_from' ? to : from;
+      const parent = kind === 'evolved_from' ? from : to;
+      openEdgeDetail(kind, child, parent, infoByName, pathByName);
+    });
+  });
+  /* 边悬停时"光在流"：CSS 动画本身持续流动；hot 时提亮并重播一次（重触发） */
+}
 
 /* 节点详情抽屉 */
 function openLineageNode(name, infoByName, pathByName) {

@@ -93,4 +93,22 @@ RENDER.timeline = async function (v) {
   $$('[data-tmode]', v).forEach(b => b.onclick = () => { S.timelineMode = b.dataset.tmode; route(); });
   $$('[data-tsub]', v).forEach(b => b.onclick = () => { S.timelineChart = b.dataset.tsub; route(); });
   $$('[data-goto-detail]', v).forEach(a => a.onclick = () => gotoDetail(a.dataset.gotoDetail));
+  if (mode === 'chart') {
+    // 图表下方补"最近 3 日明细"（收掉大片空白；与图表同源数据）
+    const dayKeys = Object.keys(days).sort().reverse().slice(0, 3);
+    const gname = k => gateName[k] || k;
+    body.insertAdjacentHTML('beforeend', `<div class="tl-side">${dayKeys.map(day => {
+      const rs = days[day];
+      const byGate = {};
+      rs.forEach(r => byGate[r.table] = (byGate[r.table] || 0) + 1);
+      const acts = {};
+      rs.forEach(r => acts[r.action] = (acts[r.action] || 0) + 1);
+      const top = Object.entries(acts).sort((a, b) => b[1] - a[1]).slice(0, 3);
+      return `<div class="card"><h3>${esc(day)} <small>${rs.length} 个动作</small></h3>
+        <div class="row" style="margin-bottom:6px">${Object.entries(byGate).map(([k, n]) =>
+          `<span class="tag">${esc(gname(k))} × ${n}</span>`).join('')}</div>
+        <div class="faint" style="font-size:11.5px">高频动作：${top.map(([a, n]) => esc(a) + ' ×' + n).join(' · ') || '—'}</div>
+      </div>`;
+    }).join('') || ''}</div>`);
+  }
 };

@@ -34,6 +34,8 @@ function ForceSim(opts) {
   this.height = opts.height || 600;
   this.collapse = opts.collapse != null ? opts.collapse : 0.25;   // 入场向心收缩系数
   this.instant = !!opts.instant;   // true=同步收敛（低动画强度/减少动效）
+  this.onEnd = null;               // 自然收敛（alpha 退火到底）后回调一次；stop() 不触发
+  this.forces = [];                // 自定义力：fn(nodes, alpha, dtf)——用于分组引力等场景
   this._last = null;               // 用于反推被拖拽节点的速度
   /* 兼容旧调用方读取的字段名 */
   this._repulse = -this.charge;
@@ -92,9 +94,18 @@ ForceSim.prototype.size = function (w, h) { this.width = w; this.height = h; };
 ForceSim.prototype.reheat = function (a) {
   this.alpha = a != null ? a : 1;
   this.alphaTarget = 0;
-  if (this.instant) { this.settle(300); if (this.onTick) this.onTick(); return; }
+  if (this.instant) {
+    this.settle(300);
+    if (this.onTick) this.onTick();
+    if (this.onEnd) this.onEnd();
+    return;
+  }
   this.start();
 };
+
+/* 注册自定义力（在链接力/碰撞力之后、积分之前作用；供分组引力等扩展使用） */
+ForceSim.prototype.addForce = function (fn) { this.forces.push(fn); return fn; };
+ForceSim.prototype.clearForces = function () { this.forces.length = 0; };
 
 ForceSim.prototype.start = function () {
   if (this.running) return;
@@ -109,7 +120,11 @@ ForceSim.prototype.start = function () {
     self._lastT = t0;
     self.step(dt / 16.7);
     if (self.onTick) self.onTick();
-    if (self.alpha < self.alphaMin && self.alphaTarget === 0) { self.running = false; return; }
+    if (self.alpha < self.alphaMin && self.alphaTarget === 0) {
+      self.running = false;
+      if (self.onEnd) self.onEnd();   // 自然收敛（非 stop()）→ 视图层据此做首次自动适配
+      return;
+    }
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
@@ -200,7 +215,10 @@ ForceSim.prototype.step = function (dtf) {
     }
   }
 
-  /* ④ 中心引力 + 积分（速度-Verlet 的简化式：v 先阻尼再位移） */
+  /* ④ 自定义力（分组引力等；调用方注册，未注册时零开销） */
+  for (var fi = 0; fi < this.forces.length; fi++) this.forces[fi](ns, a, dt);
+
+  /* ⑤ 中心引力 + 积分（速度-Verlet 的简化式：v 先阻尼再位移） */
   var decay = 1 - this.velocityDecay * (1 - 0.4 * (1 - a));
   for (i = 0; i < ns.length; i++) {
     n = ns[i];

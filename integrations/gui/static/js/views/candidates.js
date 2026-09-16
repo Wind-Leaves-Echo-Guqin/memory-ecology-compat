@@ -19,29 +19,42 @@ RENDER.candidates = async function (v) {
     </div>
     ${items.length ? `<div class="card"><table>
       <tr><th>候选</th><th>来源</th><th>时间</th><th>预览</th><th>操作</th></tr>
-      ${items.map(it => `<tr>
-        <td><a data-cdetail="${esc(it.kind)}|${esc(it.name)}"><b>${esc(it.name)}</b></a></td>
+      ${items.map((it, i) => `<tr class="cand-row a-stagger" style="animation-delay:${Math.min(i * 40, 500)}ms"
+        data-crow="${esc(it.kind + '|' + it.name)}" data-sig="${esc(it.kind + '|' + it.name + '|' + (it.mtime || ''))}">
+        <td><a data-cdetail="${esc(it.kind)}|${esc(it.name)}"><i class="inc-egg" title="待孵化：观察期候选，等待被门/采纳消费"></i><b>${esc(it.name)}</b></a></td>
         <td><span class="tag ${it.kind === 'skill' ? '' : it.kind === 'profile' ? 'warn' : 'ok'}">${esc(kindName(it.kind))}</span></td>
         <td class="faint">${esc((it.mtime || '').slice(0, 16).replace('T', ' '))}</td>
         <td class="faint ellipsis" style="max-width:380px" title="${esc(it.desc)}">${esc(it.desc)}</td>
         <td>${it.kind === 'skill'
           ? `<button class="ghost-btn act-btn" data-breed="${esc(it.name)}">孵化</button>`
           : it.kind === 'experience'
-          ? `<button class="ghost-btn act-btn" data-adopt="1">采纳</button>`
+          ? `<button class="ghost-btn act-btn" data-adopt="${esc(it.kind + '|' + it.name)}">采纳</button>`
           : '<span class="faint" title="门③语义：观察期内只读，期满自动升降级">观察期 · 只读</span>'}</td>
       </tr>`).join('')}</table></div>`
-      : `<div class="empty">暂无任何候选（三源皆空）。<br>
-        出现条件：①技能候选 = 孵化动作（eco_breed）写入 skills/.candidates；<br>
-        ②画像候选 = 门③蒸馏到达观察期的稳定特质；<br>
-        ③经验候选 = 生态捕获（eco_note）产出写入 experiences/pending。<br>
-        空态是诚实状态——机制在，实例零。</div>`}
+      : `<div class="empty-art">${Icons.empty('candidates', '暂无任何候选（三源皆空）',
+        '出现条件：①技能候选 = 孵化动作（eco_breed）写入 skills/.candidates；<br>②画像候选 = 门③蒸馏到达观察期的稳定特质；<br>③经验候选 = 生态捕获（eco_note）产出写入 experiences/pending。<br>空态是诚实状态——机制在，实例零。')}</div>`}
     ${byKind.experience ? `<div class="card"><h3>批量采纳经验候选</h3>
       <p class="faint" style="margin-bottom:8px">对全部 pending 候选执行一次 eco_note_adopt（外源自动降级 draft，候选源保留不删除）。</p>
       <button class="ghost-btn act-btn" data-act="note_adopt">预览并采纳…</button></div>` : ''}`;
 
+  // 只动画"新出现/有变化"的候选行（轮询刷新不闪）
+  const fresh = [];
+  let seenInit = localStorage.getItem('eco_cand_seen') === '1';
+  $$('.cand-row', v).forEach(tr => {
+    const key = 'cand:' + tr.dataset.crow;
+    if (!seenInit || Anim.changed(key, tr.dataset.sig)) fresh.push(tr);
+  });
+  try { localStorage.setItem('eco_cand_seen', '1'); } catch (e) { }
+  if (fresh.length && fresh.length < $$('.cand-row', v).length) Anim.markNew(fresh);
+  // 采纳动作：先播"孵化"过渡（壳裂/光晕），闸门结果回来后由 route() 刷新计数
+  $$('[data-adopt]', v).forEach(b => b.onclick = () => {
+    const row = b.closest('.cand-row');
+    if (row) { row.classList.remove('hatching'); void row.offsetWidth; row.classList.add('hatching'); }
+    runAction('note_adopt', {});
+  });
+
   $$('[data-act]', v).forEach(b => b.onclick = () => runAction(b.dataset.act, {}));
   $$('[data-breed]', v).forEach(b => b.onclick = () => openBreedForm({ name: b.dataset.breed }));
-  $$('[data-adopt]', v).forEach(b => b.onclick = () => runAction('note_adopt', {}));
   $$('[data-cdetail]', v).forEach(a => a.onclick = () => {
     const [kind, name] = a.dataset.cdetail.split('|');
     openCandidateDetail(kind, name);

@@ -28,6 +28,21 @@ RENDER.experiences = async function (v) {
   });
   const tc = { error: 'var(--exp-error)', pattern: 'var(--exp-pattern)', negative: 'var(--exp-negative)',
     success: 'var(--exp-success)', link: 'var(--exp-link)' };
+  // 经验卡（错峰入场动画放模板里；空态用专属插画）
+  const expCards = d.items.length
+    ? '<div class="exps">' + d.items.map((x, i) => `
+      <div class="exp a-stagger" style="animation-delay:${Math.min(i * 32, 480)}ms" data-exp="${esc(x.id)}">
+        <div class="etags">
+          <span class="etyp" style="background:${tc[x.type] || 'var(--ink3)'}">${esc(tName(x.type))}</span>
+          <span class="est ${x.status === 'verified' ? 'gold' : ''}">${esc(sName(x.status))}${x.status === 'verified' ? ' ★' : ''}</span>
+          ${x.distilled_to ? `<span class="est">已蒸馏 → 技能 ${esc(x.distilled_to)}</span>` : ''}
+          ${x.provenance && x.provenance.indexOf('session') >= 0 ? `<span class="faint" title="来源会话（可溯源）">⌘ ${esc(x.provenance.slice(0, 24))}</span>` : ''}
+        </div>
+        <h4>${esc(x.title)}</h4>
+        ${x.symptom ? `<div class="sym">${esc(x.symptom.slice(0, 90))}</div>` : ''}
+        <div class="meta"><span>建 ${esc(x.created)}</span><span>hit ${esc(x.last_hit || '—')}</span></div>
+      </div>`).join('') + '</div>'
+    : Icons.empty('memories', '这个筛选组合下没有经验条目', '换一个类型/状态筛选，或去生态里制造一些——经验来自真实踩坑与复盘。');
   v.innerHTML = `
     <div class="vh">经验笔记本 <small>${d.total} 条 · 命中≥2 自动草稿→已验证（金标成长位）</small></div>
     <div class="vsub">这是什么：Hermes 运行中踩坑/总结出的经验条目，报错时会自动检索匹配（注入回路在跑 <span class="dot ok"></span> · dsh 适配器未实装 <span class="dot off"></span>）。
@@ -47,18 +62,7 @@ RENDER.experiences = async function (v) {
       <span class="faint">${d.total} 条 · 第 ${d.page}/${d.pages} 页</span>
     </div>
     ${zh ? `<div class="vsub">类型速览：${['error','pattern','negative','success','link'].map(t => `<b style="color:${tc[t]}">${EXP_TYPE_ZH[t]}</b>=${EXP_TYPE_DESC[t]}`).join(' · ')}</div>` : ''}
-    <div class="exps">${d.items.map(x => `
-      <div class="exp" data-exp="${esc(x.id)}">
-        <div class="etags">
-          <span class="etyp" style="background:${tc[x.type] || 'var(--ink3)'}">${esc(tName(x.type))}</span>
-          <span class="est ${x.status === 'verified' ? 'gold' : ''}">${esc(sName(x.status))}${x.status === 'verified' ? ' ★' : ''}</span>
-          ${x.distilled_to ? `<span class="est">已蒸馏 → 技能 ${esc(x.distilled_to)}</span>` : ''}
-          ${x.provenance && x.provenance.indexOf('session') >= 0 ? `<span class="faint" title="来源会话（可溯源）">⌘ ${esc(x.provenance.slice(0, 24))}</span>` : ''}
-        </div>
-        <h4>${esc(x.title)}</h4>
-        ${x.symptom ? `<div class="sym">${esc(x.symptom.slice(0, 90))}</div>` : ''}
-        <div class="meta"><span>建 ${esc(x.created)}</span><span>hit ${esc(x.last_hit || '—')}</span></div>
-      </div>`).join('')}</div>
+    ${expCards}
     ${d.pages > 1 ? `<div class="row" style="margin-top:14px;justify-content:center">
       ${d.page > 1 ? '<button class="ghost-btn" id="pg-prev">‹ 上一页</button>' : ''}
       <span class="faint">${d.page} / ${d.pages}</span>

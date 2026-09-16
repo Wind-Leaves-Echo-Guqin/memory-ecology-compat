@@ -22,7 +22,8 @@ const S = {
   timelineMode: 'chart',
   timelineChart: 'swim',
   healthTab: 'report',
-  starmap: { mode: 'skeleton', list: false, cat: '', lines: { rel: true, blood: true, dup: true } },
+  starmap: { form: localStorage.getItem('eco_starmap_form') || '3d',
+    mode: 'skeleton', list: false, cat: '', lines: { rel: true, blood: true, dup: true } },
   cache: {},
 };
 
@@ -182,6 +183,10 @@ async function route() {
   const v = $('#view');
   // 切走时停掉星图仿真循环（否则每次进入星图都会叠加一个 rAF 循环）
   try { if (typeof SM === 'object' && SM && SM.sim) SM.sim.stop(); } catch (e) {}
+  // 血缘谱系的光点流动协调器（若在用）也要停
+  try { if (typeof Lin !== 'undefined' && Lin && Lin.stop) Lin.stop(); } catch (e) {}
+  // 3D 星空循环必须停（否则切走视图后 WebGL 还在后台打帧）
+  try { if (typeof GL3D !== 'undefined' && GL3D && GL3D.stop) GL3D.stop(); } catch (e) {}
   const animate = S.animLevel !== 'low' && !prefersReduced();
   // 退出：旧内容淡出上移（内容先上屏，动效只作过渡，可被后续导航打断）
   if (animate) {
@@ -217,8 +222,19 @@ async function route() {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 window.addEventListener('hashchange', route);
 
-/* ── 检索（三模式 + 复制 + 历史） ── */
+/* ── 检索（三模式 + 复制 + 历史 + 命中关键词高亮） ── */
 const SEARCH_HIST_MAX = 20;
+/* 命中高亮：先转义再包 <mark>（顺序不能反——否则会把自己插的标签再转义一次） */
+function hl(text, terms) {
+  let out = esc(String(text == null ? '' : text));
+  const list = (terms || []).filter(t => t && String(t).trim().length >= 2)
+    .map(t => String(t).trim()).sort((a, b) => b.length - a.length).slice(0, 8);
+  list.forEach(t => {
+    const re = new RegExp('(' + t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
+    out = out.replace(re, '<mark class="hl">$1</mark>');
+  });
+  return out;
+}
 async function doSearch(qArg) {
   const inp = $('#search-input');
   const q = (qArg != null ? String(qArg) : inp.value).trim();
@@ -234,30 +250,34 @@ async function doSearch(qArg) {
     let html = '';
     const resultText = JSON.stringify(r, null, 2);
     html += '<div class="sr-copy"><a id="search-copy">复制结果</a></div>';
+    // 高亮词：整句 + 分词（≥2 字） + 报错模式下的异常类名
+    const terms = [q].concat(q.split(/[\s,;，；、()（）\[\]{}<>"'`]+/));
+    if (S.searchMode === 'error') terms.push(...(r.exc || []));
     if (S.searchMode === 'error')
       html += `<div class="sr-head">根因分层 · 异常类：${esc((r.exc || []).join(', ') || '—')}</div>`;
     if (r.hits && r.hits.length) {
-      r.hits.forEach(hh => {
+      r.hits.forEach((hh, i) => {
         const id = hh.id || '';
-        html += `<div class="sr-hit" ${id.startsWith('exp-') ? `data-exp="${esc(id)}"` : id ? `data-skill="${esc(hh.name || id)}"` : ''}>
+        html += `<div class="sr-hit" style="animation-delay:${Math.min(i * 26, 320)}ms" ${id.startsWith('exp-') ? `data-exp="${esc(id)}"` : id ? `data-skill="${esc(hh.name || id)}"` : ''}>
           <div class="sr-line">
             ${hh.type ? `<span class="tag">${esc(hh.type)}</span>` : ''}
             ${hh.status ? `<span class="tag">${esc(hh.status)}</span>` : ''}
-            <span class="sr-t">${esc(hh.trigger || hh.name || hh.id)}</span>
+            <span class="sr-t">${hl(hh.trigger || hh.name || hh.id, terms)}</span>
             ${hh.indeg != null ? `<span class="faint">被引${hh.indeg}</span>` : ''}
           </div>
-          ${hh.evidence ? `<div class="sr-d mono">${esc(hh.evidence.slice(0, 140))}</div>` : ''}
-          ${hh.desc ? `<div class="sr-d">${esc(hh.desc.slice(0, 140))}</div>` : ''}
-          ${hh.sections ? `<div class="sr-d faint">${esc(hh.sections.slice(0, 120))}</div>` : ''}
+          ${hh.evidence ? `<div class="sr-d mono">${hl(hh.evidence.slice(0, 140), terms)}</div>` : ''}
+          ${hh.desc ? `<div class="sr-d">${hl(hh.desc.slice(0, 140), terms)}</div>` : ''}
+          ${hh.sections ? `<div class="sr-d faint">${hl(hh.sections.slice(0, 120), terms)}</div>` : ''}
         </div>`;
       });
     } else if (r.raw) {
       html += `<pre class="mono" style="white-space:pre-wrap;font-size:11.5px;color:var(--ink2)">${esc(r.raw.slice(0, 2000))}</pre>`;
     } else {
-      html += '<div class="faint" style="padding:8px">无命中。</div>';
+      html += Icons.empty('search', '没有命中', '试试更短的关键词，或切换检索模式（经验 / 报错 / 生态）。');
     }
     panel.innerHTML = html;
-    $('#search-copy').onclick = () => ecoCopy(resultText, '检索结果已复制');
+    const cp = $('#search-copy');
+    if (cp) cp.onclick = () => ecoCopy(resultText, '检索结果已复制');
     $$('[data-exp]', panel).forEach(el => el.onclick = () => { closeSearch(); gotoExp(el.dataset.exp); });
     $$('[data-skill]', panel).forEach(el => el.onclick = () => { closeSearch(); gotoSkill(el.dataset.skill); });
   } catch (e) {
@@ -509,6 +529,8 @@ function initPalette() {
     $$('#palette-dots i').forEach(i => i.onclick = () => setPalette(i.dataset.p));
   }
   if (typeof Particles !== 'undefined') Particles.sync();   // 深色板才开粒子层
+  if (typeof SM === 'object' && SM && SM.recolor) SM.recolor();  // 平铺星图按色板重算色阶
+  if (typeof GL3D === 'object' && GL3D && GL3D.recolor && SM && SM.catColors) GL3D.recolor(SM.catColors);
 }
 
 /* ── 动画强度（T12）：low 仅淡入淡出 / medium 过渡+度量+图表 / full 全部 ── */
@@ -519,9 +541,25 @@ function setAnimLevel(lv, silent) {
   document.documentElement.dataset.anim = lv;
   $$('#anim-ctl button').forEach(b => b.classList.toggle('on', b.dataset.lv === lv));
   if (typeof Particles !== 'undefined') Particles.sync();
+  // 星图：切换档位后就地重估（保留用户拖出来的布局，不重建整图）
+  if (typeof SM === 'object' && SM && SM.applyAnimLevel) SM.applyAnimLevel();
+  if (typeof GL3D === 'object' && GL3D && GL3D.ready) {
+    if (Anim.on() && !Anim.degraded) GL3D.start(); else { GL3D.stop(); GL3D.rotate = false; GL3D.renderOnce(); }
+  }
   if (silent) return;
   const zh = { low: '轻度（仅淡入淡出）', medium: '中度（过渡+度量+图表）', full: '满载（全部动效）' };
   toast('动画强度：' + zh[lv], true);
+}
+
+/* ── 内联 SVG 图标注入（T6）：把 [data-ico] 占位换成统一样式的矢量图标 ── */
+function initIcons() {
+  if (typeof Icons === 'undefined') return;
+  $$('[data-ico]').forEach(el => {
+    const name = el.dataset.ico;
+    const svg = Icons.svg(name, el.dataset.icoSize ? +el.dataset.icoSize : 16);
+    if (svg) el.innerHTML = svg;
+    el.removeAttribute('data-ico');
+  });
 }
 
 /* ── 全局字号（12.5/13.5/14.5/15.5 四档，默认 13.5 兼顾屏显密度与可读性） ── */
@@ -646,6 +684,7 @@ function initEnv() {
 
 /* ── 启动 ── */
 initEnv();
+initIcons();                       // 内联 SVG 图标（导航/顶栏/抽屉关闭）
 try { Particles.init(); } catch (e) { /* 旧内核无 canvas 时静默降级 */ }
 initPalette();
 applyFont();

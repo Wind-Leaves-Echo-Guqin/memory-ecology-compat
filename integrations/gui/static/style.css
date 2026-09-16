@@ -35,6 +35,10 @@
   --blur-card:12px; --blur-float:16px;
   /* 发光层：浅色板为全透明占位（不可写成 none——会让 box-shadow 整条失效） */
   --glow:0 0 0 0 rgba(0,0,0,0); --glow-ink:none;
+  /* 动效 token（T7）：新动效一律用这些变量，禁止散落魔法数字 */
+  --dur-fast:.12s; --dur-base:.3s; --dur-slow:.6s;
+  --ease-out:cubic-bezier(.22,.61,.36,1); --ease-inout:cubic-bezier(.4,0,.2,1);
+  --ease-back:cubic-bezier(.34,1.4,.5,1);
 }
 /* ── 色板 token（三套精修） ── */
 /* a 雾白：默认。微暖底、柔和深灰墨色、低刺激 */
@@ -77,6 +81,17 @@ a{color:var(--accent); text-decoration:none; cursor:pointer}
   font-size:11px; padding:0 2px}
 .linklike:hover{text-decoration:underline}
 
+/* ── 图标（内联 SVG，见 viz/icons.js）：16px 网格 · stroke 1.5 · currentColor ── */
+.ico{flex:none; display:inline-block; vertical-align:-.19em}
+#nav a i{font-style:normal; width:16px; height:16px; display:inline-flex; align-items:center;
+  justify-content:center; color:var(--ink3); flex:none}
+#nav a i .ico{width:16px; height:16px}
+#nav a.on i{color:var(--accent)}
+button .ico{margin-right:5px}
+button .ico:only-child{margin-right:0}
+#refresh-btn,#firstaid-btn{display:inline-flex; align-items:center; gap:5px}
+#firstaid-btn .ico,#refresh-btn .ico{margin:0}
+
 /* ── 导航栏 ── */
 #nav{width:176px; flex:none; display:flex; flex-direction:column; padding:14px 10px;
   border-right:1px solid var(--line); background:var(--surface);
@@ -86,11 +101,10 @@ a{color:var(--accent); text-decoration:none; cursor:pointer}
 .brand-dot{width:9px; height:9px; border-radius:50%; background:var(--accent); align-self:center; flex:none}
 .brand-sub{font-size:11px; color:var(--ink3); font-weight:400}
 #nav a{display:flex; align-items:center; gap:9px; padding:8px 12px; border-radius:8px;
-  color:var(--ink2); font-size:13px; margin-bottom:2px; border:1px solid transparent}
-#nav a i{font-style:normal; width:16px; text-align:center; color:var(--ink3); font-size:12px}
+  color:var(--ink2); font-size:13px; margin-bottom:2px; border:1px solid transparent;
+  transition:background var(--dur-fast), color var(--dur-fast)}
 #nav a:hover{background:var(--accent-soft)}
 #nav a.on{background:var(--accent-soft); color:var(--accent); font-weight:600}
-#nav a.on i{color:var(--accent)}
 .nav-foot{margin-top:auto; padding:10px; font-size:10.5px; color:var(--ink3);
   border-top:1px dashed var(--line); line-height:1.7}
 
@@ -238,10 +252,6 @@ tbody tr:nth-child(even) td{background:rgba(127,140,155,.045)}
 .filters{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; align-items:center}
 .filters select, .filters input{border:1px solid var(--line); background:var(--surface2);
   border-radius:7px; padding:5px 9px; font:12px var(--font); color:var(--ink); outline:none}
-.frozen{border:1px solid rgba(120,160,190,.5); position:relative}
-.frozen::after{content:"❄ 隔离区"; position:absolute; top:-9px; right:12px; font-size:10.5px;
-  background:var(--surface); color:var(--ink3); padding:0 8px; border-radius:6px;
-  border:1px solid var(--line)}
 .empty-ok{color:var(--ink3); font-size:12px; padding:8px 4px; line-height:1.8}
 
 /* ── 经验 ── */
@@ -268,19 +278,117 @@ tbody tr:nth-child(even) td{background:rgba(127,140,155,.045)}
 .sect .sect-b.mono{font-family:var(--mono); font-size:11.5px; background:var(--bg2);
   border:1px solid var(--line); border-radius:6px; padding:6px 9px}
 
-/* ── 星图 ── */
+/* ── 星图 v0.3.3：深空观测窗（T1 视觉重构）
+   星图是一扇"观测窗"，不跟着浅色外框走：暗底面板才能提供发光球体的立体感与景深。
+   面板内所有元素采用独立的深空配色（不引用外框的 --ink/--surface）。 ── */
 .starmap-tools{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; align-items:center;
   font-size:12px}
-.starmap-wrap{position:relative}
-#starmap-svg{width:100%; height:calc(100vh - 240px); min-height:480px; display:block;
-  border:1px solid var(--line); border-radius:11px; background:var(--surface);
-  touch-action:none; cursor:grab}
+.starmap-tools select{border:1px solid var(--line); background:var(--surface2); border-radius:7px;
+  padding:5px 9px; font:12px var(--font); color:var(--ink)}
+.sm-toggle{display:inline-flex; gap:10px; align-items:center; color:var(--ink2)}
+.sm-toggle label{display:inline-flex; gap:4px; align-items:center; cursor:pointer}
+.starmap-wrap{position:relative; overflow:hidden; border-radius:12px; background:#080b12;
+  box-shadow:0 2px 4px rgba(10,16,26,.10), 0 18px 46px rgba(10,16,26,.24)}
+#starmap-svg{width:100%; height:calc(100vh - 250px); min-height:480px; display:block;
+  touch-action:none; cursor:grab; border:1px solid rgba(140,180,220,.16); border-radius:12px;
+  background:radial-gradient(122% 104% at 50% 0%, #131e30 0%, #0b1220 46%, #070a10 100%)}
 #starmap-svg:active{cursor:grabbing}
-#starmap-svg text{font:10px var(--font); fill:var(--ink3); pointer-events:none}
-#starmap-svg .node{cursor:pointer}
-#starmap-svg .node:hover circle{stroke:var(--ink); stroke-width:1.6}
-.starmap-hint{position:absolute; top:10px; right:14px; font-size:11px}
-.starmap-legend{position:absolute; bottom:10px; left:14px; font-size:11px; pointer-events:none}
+#starmap-svg text{font:10px var(--font); fill:#a9bed4; pointer-events:none}
+/* 星野：星尘闪烁 + 视差层 */
+#starmap-svg .dust{animation:smTwinkle 7s var(--ease-inout) infinite}
+#starmap-svg .dust.d0{animation-duration:5.6s}
+#starmap-svg .dust.d1{animation-duration:7.4s; animation-delay:1.3s}
+#starmap-svg .dust.d2{animation-duration:9.2s; animation-delay:2.7s}
+@keyframes smTwinkle{0%,100%{opacity:.45} 50%{opacity:1}}
+#starmap-svg .par{transition:transform .35s var(--ease-out)}
+/* 软分组：径向渐变的"星云云团" + 虚线边界 + 组名 */
+#starmap-svg .gblob{opacity:.9}
+#starmap-svg text.glabel{font-size:10.5px; font-weight:600; letter-spacing:.07em; fill:#8fa8c2; opacity:.9}
+/* 节点：哑光/液态玻璃球体（AO + 柔光 + 玻璃体 + 折射亮缘 + 双光高光 + 焦散/透镜光带） */
+#starmap-svg .node{cursor:pointer; transition:opacity var(--dur-base) var(--ease-out)}
+#starmap-svg .node .ao,#starmap-svg .node .caustic,#starmap-svg .node .refr,
+#starmap-svg .node .hlw,#starmap-svg .node .hlc,#starmap-svg .node .bloom{pointer-events:none}
+#starmap-svg .node .ring{transition:opacity var(--dur-fast), stroke-width var(--dur-fast)}
+#starmap-svg .nlabel{paint-order:stroke; stroke:#070a10; stroke-width:2.8px; stroke-linejoin:round;
+  font-size:10.5px; fill:#bed0e4; transition:opacity var(--dur-fast) linear}
+#starmap-svg .node.dim{opacity:.1}
+#starmap-svg .node.nb{opacity:1}
+#starmap-svg .node.nb .ring{opacity:.9}
+#starmap-svg .node.hot .ring{opacity:1; stroke-width:1.8}
+#starmap-svg .node.hot .halo{opacity:1.55}
+#starmap-svg .node.hot .ball{stroke:#eaf6ff; stroke-width:1}   /* 玻璃：悬停只补一圈极细亮边，不糊掉材质 */
+#starmap-svg .node.hot .bloom,#starmap-svg .node.hot .caustic{opacity:1.6}
+#starmap-svg .node.hot .nlabel{font-weight:600; font-size:11.5px; fill:#eaf4ff}
+/* 悬停涟漪（一次扩散；low 档/降级不播） */
+#starmap-svg .ripple{transform-box:fill-box; transform-origin:center; pointer-events:none;
+  animation:smRipple .85s var(--ease-out) forwards}
+@keyframes smRipple{from{transform:scale(.7); opacity:.65} to{transform:scale(3.8); opacity:0}}
+/* 聚焦准星（旋转虚线环） */
+#starmap-svg .reticle{transform-box:fill-box; transform-origin:center; pointer-events:none;
+  animation:smSpin 9s linear infinite; opacity:.9}
+/* 边：细线低 alpha + 血缘线的"宽淡辉光 + 细亮芯"双层 */
+#starmap-svg .epath{transition:stroke var(--dur-fast)}
+#starmap-svg.emph .epath{opacity:.07}
+#starmap-svg.emph .epath.hot{opacity:1; stroke:#e8f4ff; stroke-width:2.2}
+#starmap-svg.emph .eglow{opacity:0}
+#starmap-svg.emph .eglow.hot{opacity:.3}
+/* 血缘边流动光点（光点流向 = 演化/合并的真实方向；纯 CSS，零 rAF） */
+#starmap-svg .eflow{stroke-dasharray:2.5 15; stroke-linecap:round; pointer-events:none;
+  animation:smFlow 1.4s linear infinite}
+#starmap-svg .eflow.rev{animation-direction:reverse}
+@keyframes smFlow{from{stroke-dashoffset:0} to{stroke-dashoffset:-17.5}}
+/* 悬停光流：光从本节点沿连线流向邻域（最直观的"关系在流动"） */
+#starmap-svg .htravel{stroke-dasharray:2 13; stroke-linecap:round; pointer-events:none;
+  animation:smFlow 1.1s linear infinite}
+/* 候选 = 待孵化形态：呼吸 + 虚线环慢转 */
+#starmap-svg .node.cand .ball{transform-box:fill-box; transform-origin:center;
+  animation:smBreathe 2.8s var(--ease-inout) infinite}
+#starmap-svg .node.cand .ring{transform-box:fill-box; transform-origin:center; animation:smSpin 11s linear infinite}
+@keyframes smBreathe{0%,100%{opacity:.6; transform:scale(1)} 50%{opacity:1; transform:scale(1.12)}}
+@keyframes smSpin{to{transform:rotate(360deg)}}
+.starmap-hint{position:absolute; top:10px; right:14px; font-size:11px; color:#7d94ad;
+  background:rgba(10,15,24,.62); border:1px solid rgba(140,180,220,.16); border-radius:7px;
+  padding:3px 9px; backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px)}
+.starmap-legend{position:absolute; bottom:10px; left:14px; font-size:11px; display:flex;
+  gap:14px; flex-wrap:wrap; pointer-events:none; color:#8fa8c2;
+  background:rgba(10,15,24,.68); border:1px solid rgba(140,180,220,.16); border-radius:9px;
+  padding:6px 12px; backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px)}
+.starmap-legend .lgd{display:inline-flex; align-items:center; gap:6px}
+.starmap-legend i{width:18px; height:0; border-top:2px solid #9dbdd8; display:inline-block; opacity:.5}
+.starmap-legend i.lblood{border-top:2px dashed #a98cf0; opacity:.9}
+.starmap-legend i.ldup{border-top:2px dotted #e0b23c; opacity:.85}
+.starmap-legend i.lcand{width:9px; height:9px; border:1.4px dashed #c3aef0; border-radius:50%}
+.starmap-legend i.ldang{width:8px; height:8px; border:none; border-radius:2px; background:#f87171}
+/* 悬停关系清单（深空 HUD 风格） */
+.sm-relcap{position:absolute; z-index:30; width:222px; display:flex; flex-direction:column; gap:3px;
+  background:rgba(11,17,27,.86); border:1px solid rgba(140,180,220,.2); border-radius:10px;
+  padding:9px 12px; font-size:11px; color:#a9bed4; pointer-events:none;
+  box-shadow:0 14px 36px rgba(0,0,0,.5); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+  animation:fadein var(--dur-base) var(--ease-out) both}
+.sm-relcap b{font-size:11.5px; margin-bottom:3px; color:#eaf4ff}
+.sm-relcap span{display:flex; gap:6px; align-items:flex-start;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.sm-relcap .rk{width:7px; height:7px; border-radius:2px; flex:none; margin-top:4px}
+.sm-relcap .rk.rel{background:#9dbdd8}
+.sm-relcap .rk.blood{background:#a98cf0}
+.sm-relcap .rk.dup{background:#e0b23c}
+
+/* ── 3D 星空（WebGL / 本地 Three.js）：玻璃球体 + 简单光追 ── */
+.gl3d-wrap{background:#04070d}
+#gl3d-host{position:relative; width:100%; height:calc(100vh - 250px); min-height:480px;
+  border:1px solid rgba(140,180,220,.16); border-radius:12px; overflow:hidden;
+  background:radial-gradient(122% 104% at 50% 0%, #101a2b 0%, #080d16 48%, #04060b 100%)}
+.gl3d-canvas{display:block; width:100%; height:100%; touch-action:none; cursor:grab}
+.gl3d-canvas:active{cursor:grabbing}
+.gl3d-labels{position:absolute; inset:0; pointer-events:none; overflow:hidden}
+.gl3d-label{position:absolute; left:0; top:0; white-space:nowrap; font-size:11px; color:#cfe2f2;
+  text-shadow:0 1px 4px rgba(4,7,13,.95), 0 0 2px rgba(4,7,13,.9);
+  transition:opacity var(--dur-base) var(--ease-out)}
+.gl3d-label.on{color:#f2fbff; font-weight:600; font-size:12px}
+.starmap-legend i.lglass{width:11px; height:11px; border-radius:50%; border:1.2px solid rgba(220,240,255,.7);
+  background:radial-gradient(circle at 34% 30%, rgba(255,255,255,.85), rgba(140,190,225,.35) 55%, rgba(90,130,170,.2));
+  border-top-width:1.2px}
+[data-anim="low"] .gl3d-label{transition:none}
 .popover{position:fixed; z-index:60; width:300px; background:var(--surface);
   backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
   border:1px solid var(--line); border-radius:var(--radius); padding:13px 15px;
@@ -296,19 +404,50 @@ tbody tr:nth-child(even) td{background:rgba(127,140,155,.045)}
 .popover .pstar{position:absolute; top:9px; right:11px; cursor:pointer; font-size:14px; color:var(--ink3)}
 .popover .pstar.on{color:var(--warn)}
 
-/* ── 血缘图 v0.3.2：链路故事卡 ── */
+/* ── 血缘谱系 v0.3.3：真谱系图（分叉 + 汇聚）+ 链路故事卡（伴生视图） ── */
+.ln-ctl{display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:10px; font-size:12px}
+.ln-wrap{position:relative; overflow-x:auto}
+#lineage-svg{width:100%; min-height:200px; display:block}
+#lineage-svg .lnode{cursor:pointer; transition:opacity var(--dur-base) var(--ease-out)}
+#lineage-svg .lnode .lnbox{fill:var(--surface2); stroke:var(--line); stroke-width:1.2;
+  transition:stroke var(--dur-fast), fill var(--dur-fast)}
+#lineage-svg .lnode:hover .lnbox{stroke:var(--accent); fill:var(--accent-soft)}
+#lineage-svg .lnode .lnname{font:600 11.5px var(--font); fill:var(--ink); pointer-events:none}
+#lineage-svg .lnode .lnmeta{font:10px var(--font); fill:var(--ink3); pointer-events:none}
+#lineage-svg .lnode .lnbar{opacity:.85}
+#lineage-svg .lnode.dim{opacity:.22}
+#lineage-svg .lnode:hover{filter:drop-shadow(0 4px 12px rgba(20,30,40,.16))}
+#lineage-svg .ledge{fill:none; stroke-linecap:round; transition:opacity var(--dur-fast), stroke-width var(--dur-fast)}
+#lineage-svg.emph .ledge{opacity:.12}
+#lineage-svg.emph .ledge.hot{opacity:1; stroke-width:2.4}
+#lineage-svg .lnflow{pointer-events:none}
+#lineage-svg .ledge-flow{fill:none; stroke-linecap:round; stroke-dasharray:3 16; opacity:.5;
+  animation:lnFlow 1.7s linear infinite}
+#lineage-svg .ledge-flow.rev{animation-direction:reverse}
+#lineage-svg.emph .ledge-flow{opacity:.12}
+#lineage-svg.emph .ledge-flow.on{opacity:1; animation-duration:.9s}
+@keyframes lnFlow{from{stroke-dashoffset:0} to{stroke-dashoffset:-19}}
+/* 图上悬停提示（与星图关系清单同风格） */
+.ln-tip{position:absolute; z-index:30; max-width:250px; background:var(--surface); border:1px solid var(--line);
+  border-radius:9px; padding:7px 11px; font-size:11.5px; pointer-events:none;
+  box-shadow:var(--shadow-float); backdrop-filter:blur(var(--blur-float));
+  -webkit-backdrop-filter:blur(var(--blur-float)); animation:fadein var(--dur-fast) var(--ease-out) both}
+/* 新记录"生长"出现（外层 g 用 transform 属性定位，动画放在内层，避免覆盖定位） */
+.ln-anim{animation:lnGrow var(--dur-slow) var(--ease-back) both}
+@keyframes lnGrow{from{opacity:0; transform:translateY(10px) scale(.9)} to{opacity:1; transform:none}}
+/* 链路故事卡（保留：信息密度高，与图互为伴生视图） */
 .chain-card{border:1px solid var(--line); border-radius:9px; background:var(--surface2);
-  padding:11px 14px; margin-bottom:9px}
+  padding:11px 14px; margin-bottom:9px; transition:border-color var(--dur-fast), box-shadow var(--dur-fast)}
+.chain-card:hover{border-color:var(--accent)}
+.chain-card.hot{border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft)}
 .chain-flow{display:flex; gap:10px; align-items:center; flex-wrap:wrap; font-size:13px}
 .chain-node{font-weight:650; color:var(--accent); cursor:pointer}
 .chain-node:hover{text-decoration:underline}
 .chain-arrow{color:var(--ink3); font-size:12px}
-.chain-arrow[style]{font-weight:600}
+.chain-arrow.ev{color:var(--blood-line); font-weight:600}
+.chain-arrow.mg{color:var(--warn); font-weight:600}
 .chain-meta{margin-top:5px; font-size:11.5px}
 .chain-ops{margin-top:5px; font-size:11.5px}
-#lineage-svg{width:100%}
-#lineage-svg .lnode:hover rect{stroke:var(--accent)}
-#lineage-svg line:hover{opacity:1; stroke-width:2.6}
 .bf-input{width:100%; border:1px solid var(--line); background:var(--surface2);
   border-radius:7px; padding:6px 9px; font:12px var(--font); color:var(--ink); outline:none}
 .bf-input:focus{border-color:var(--accent)}
@@ -510,10 +649,8 @@ tr.p0-row td, td.p0-cell{background:rgba(208,83,83,.10) !important; color:var(--
   transition:opacity .6s ease-out}
 #nav, #main{position:relative; z-index:1}
 
-/* ── 图表入场动效（T11：属性过渡替代整图重绘） ── */
-.swim-ev{animation:swimIn .45s cubic-bezier(.22,.61,.36,1) both}
-.swim-ev:nth-child(2n){animation-delay:.05s}
-.swim-ev:nth-child(3n){animation-delay:.1s}
+/* ── 图表入场动效（T11：属性过渡替代整图重绘；错峰延迟由 charts.js 逐元素写入） ── */
+.swim-ev{animation:swimIn .45s var(--ease-out) both}
 @keyframes swimIn{from{opacity:0; transform:translateX(-8px)}to{opacity:1; transform:none}}
 .swim rect, .swim polyline, .trend rect{transform-box:fill-box; transform-origin:bottom center;
   animation:barUp .5s cubic-bezier(.22,.61,.36,1) both}
@@ -527,7 +664,25 @@ html[data-anim="low"] .swim-ev,
 html[data-anim="low"] .swim rect,
 html[data-anim="low"] .swim polyline,
 html[data-anim="low"] .trend rect,
-html[data-anim="low"] .strata .sbar{animation:none}
+html[data-anim="low"] .strata .sbar,
+html[data-anim="low"] .a-stagger,
+html[data-anim="low"] .a-in,
+html[data-anim="low"] .ln-anim,
+html[data-anim="low"] .sr-hit,
+html[data-anim="low"] .tl-row,
+html[data-anim="low"] .mem-row,
+html[data-anim="low"] .l1-entry,
+html[data-anim="low"] .exp,
+html[data-anim="low"] #starmap-svg .eflow,
+html[data-anim="low"] #starmap-svg .htravel,
+html[data-anim="low"] #starmap-svg .ripple,
+html[data-anim="low"] #starmap-svg .node.cand .ball,
+html[data-anim="low"] #starmap-svg .node.cand .ring,
+html[data-anim="low"] #lineage-svg .ledge-flow,
+html[data-anim="low"] .cand-row .inc-egg,
+html[data-anim="low"] .rp-strip .rpb,
+html[data-anim="low"] .al-new,
+html[data-anim="low"] .water .fill::after{animation:none !important; transition:none !important}
 
 /* ── 全屏巡航模式（T14：轮播九视图 / 固定驾驶舱大屏） ── */
 html.cruising #nav, html.cruising #statusbar{display:none}
@@ -601,9 +756,9 @@ html[data-anim="low"] .view-anim>*{animation:none}
   #nav .brand{font-size:0; gap:0; padding:4px 0 14px}
   #nav .brand-dot{margin:0 auto}
   #nav .brand-sub{display:none}
-  #nav a{justify-content:center; padding:9px 6px; font-size:0; gap:0}
-  #nav a i{font-size:16px; width:auto; color:var(--accent)}
-  #nav a.on{font-size:0}
+  #nav a{justify-content:center; padding:9px 6px; gap:0}
+  #nav a span{display:none}                /* 只留图标（SVG 不受 font-size:0 影响） */
+  #nav a i .ico{width:17px; height:17px}
   #nav .nav-foot{display:none}
   #topbar{gap:10px; padding:0 12px; height:50px}
   #search-pills{display:none}
@@ -611,8 +766,8 @@ html[data-anim="low"] .view-anim>*{animation:none}
   #search-input{min-width:80px}
   .topbar-right{gap:8px}
   .palette-dots i{width:13px; height:13px}
-  #firstaid-btn{font-size:0; padding:6px 9px}   /* 只留 🧰 图标 */
-  #refresh-btn{font-size:0; padding:6px 9px}    /* 只留 ⟳ 图标 */
+  #firstaid-btn .btn-txt, #refresh-btn .btn-txt{display:none}   /* 只留图标 */
+  #firstaid-btn, #refresh-btn{padding:6px 9px}
   #view{padding:14px 16px 26px}
   #statusbar{height:28px; font-size:10.5px; gap:10px; padding:0 12px}
   #statusbar .sep{display:none}
@@ -629,3 +784,114 @@ html[data-anim="low"] .view-anim>*{animation:none}
 }
 /* 桌面端（pywebview）标记：供 JS/CSS 精确切换（动画朴素、隐藏仅浏览器端功能） */
 html[data-desktop="true"] .html-only{display:none !important}
+
+/* ============================================================
+   v0.3.3 增补：动效基元 / 空态插画 / 视图形象化（T1–T7）
+   全部受 html[data-anim=low] 与 prefers-reduced-motion 管控
+   ============================================================ */
+
+/* ── 通用入场（Anim.staggerIn / Anim.lazyIn 使用；不写内联 opacity，动画缺失时仍可见） ── */
+.a-stagger{animation:aStagger var(--dur-base) var(--ease-out) both}
+@keyframes aStagger{from{opacity:0; transform:translateY(7px)} to{opacity:1; transform:none}}
+.a-in{animation:aStagger var(--dur-base) var(--ease-out) both}
+.a-pop{animation:aPop var(--dur-slow) var(--ease-back) both}
+@keyframes aPop{from{opacity:0; transform:scale(.9)} to{opacity:1; transform:none}}
+/* 数值/徽标变化时的"跳一下" */
+.a-bump{animation:aBump var(--dur-slow) var(--ease-out) both}
+@keyframes aBump{0%{transform:scale(1)} 32%{transform:scale(1.14)} 100%{transform:scale(1)}}
+/* 环形评分闪光（评分变化时播一次） */
+.ring.flash .arc{filter:drop-shadow(0 0 7px var(--accent)); transition:filter var(--dur-slow)}
+.ring.flash{animation:aRing .9s var(--ease-out) both}
+@keyframes aRing{0%{transform:rotate(-90deg) scale(1)} 35%{transform:rotate(-90deg) scale(1.06)} 100%{transform:rotate(-90deg) scale(1)}}
+
+/* ── 空态插画（viz/icons.js 的 Icons.empty） ── */
+.empty-art{border:1px dashed var(--line); border-radius:10px; padding:20px 22px 22px;
+  text-align:center; color:var(--ink3); font-size:12.5px; line-height:1.9;
+  display:flex; flex-direction:column; align-items:center; gap:4px}
+.empty-illus{width:132px; height:95px; color:var(--accent); opacity:.5; margin-bottom:2px}
+.empty-title{font-size:13px; font-weight:600; color:var(--ink2)}
+.empty-hint{max-width:560px; color:var(--ink3)}
+.empty-hint b{color:var(--ink2)}
+
+/* ── 检索面板：命中飞入 + 关键词高亮 ── */
+.sr-hit{animation:aStagger var(--dur-base) var(--ease-out) both}
+mark.hl{background:var(--accent-soft); color:var(--accent); font-weight:600;
+  border-radius:3px; padding:0 2px; box-shadow:inset 0 -1px 0 var(--accent)}
+
+/* ── 记忆库：条目错峰、水位流动、徽章过渡、隔离区低温 ── */
+.l1-entry{transition:border-left-color var(--dur-fast), background var(--dur-fast)}
+.l1-entry:hover{background:var(--accent-soft)}
+.l1-entry.hot{animation:aHot 1s var(--ease-out) both}
+@keyframes aHot{0%{background:var(--accent-soft); box-shadow:inset 0 0 0 1px var(--accent)}
+  100%{background:transparent; box-shadow:none}}
+.mem-row td{transition:background var(--dur-fast)}
+/* 未越线时水位条缓慢流动高光（低强度；越线交给 pulse 呼吸） */
+.water .fill{position:absolute; overflow:hidden}
+.water .fill::after{content:""; position:absolute; inset:0;
+  background:linear-gradient(100deg, transparent 20%, rgba(255,255,255,.42) 50%, transparent 80%);
+  background-size:220% 100%; animation:waterFlow 5.5s linear infinite}
+@keyframes waterFlow{from{background-position:180% 0} to{background-position:-80% 0}}
+.water .fill.over-fill::after{animation:none}
+/* 状态徽章：颜色过渡 + 微缩放，不用硬切换 */
+.tag,.badge,.est,.etyp{transition:background var(--dur-base) var(--ease-out),
+  color var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out)}
+.tag.flip{animation:aBump var(--dur-slow) var(--ease-out) both}
+/* 隔离区低温视觉（淡蓝霜渐变 + 边缘霜纹） */
+.frozen{position:relative; border:1px solid rgba(120,160,190,.55);
+  background:linear-gradient(160deg, rgba(186,222,241,.20), rgba(255,255,255,.02) 70%)}
+[data-palette="f"] .frozen{background:linear-gradient(160deg, rgba(120,190,230,.10), transparent 70%)}
+.frozen::after{content:"❄ 隔离区"; position:absolute; top:-9px; right:12px; font-size:10.5px;
+  background:var(--surface); color:#4a7fa5; padding:0 8px; border-radius:6px;
+  border:1px solid rgba(120,160,190,.45)}
+.frozen .l1-entry{border-left-color:rgba(120,160,190,.5)}
+.frozen.thawing{animation:aThaw 1s var(--ease-out) both}
+@keyframes aThaw{from{filter:saturate(.4) brightness(1.06)} to{filter:none}}
+
+/* ── 候选孵化台：待孵化呼吸 + 采纳后的孵化过渡 ── */
+.cand-row{position:relative}
+.cand-row .inc-egg{display:inline-flex; width:9px; height:9px; border-radius:50% 50% 50% 50%/60% 60% 40% 40%;
+  background:var(--gate3); opacity:.8; margin-right:7px; vertical-align:-1px;
+  animation:eggBreath 2.6s var(--ease-inout) infinite}
+@keyframes eggBreath{0%,100%{transform:scale(1); box-shadow:0 0 0 0 rgba(122,82,192,.35)}
+  50%{transform:scale(1.16); box-shadow:0 0 0 5px rgba(122,82,192,0)}}
+.cand-row.hatching{animation:aHatch 1.1s var(--ease-out) both}
+@keyframes aHatch{0%{filter:none} 25%{filter:drop-shadow(0 0 12px var(--gate3)) brightness(1.1)}
+  100%{filter:none}}
+.srcband{display:inline-block; width:3px; height:100%; border-radius:2px; margin-right:8px}
+.srcband.skill{background:var(--gate3)} .srcband.profile{background:var(--gate2)}
+.srcband.experience{background:var(--ok)}
+
+/* ── 时间线：泳道顺序入场 + 回放点亮 + 直方图数值 ── */
+.swim-ev{animation:aSwimIn var(--dur-base) var(--ease-out) both}
+@keyframes aSwimIn{from{opacity:0; transform:translateX(-9px)} to{opacity:1; transform:none}}
+.swim-ev rect{transition:opacity var(--dur-fast), transform var(--dur-fast)}
+.swim-ev:hover rect{opacity:1}
+.tl-row{animation:aStagger var(--dur-base) var(--ease-out) both}
+.rp-strip{display:flex; gap:2px; align-items:stretch; height:22px; margin:10px 0 4px;
+  background:var(--surface2); border:1px solid var(--line); border-radius:6px; padding:3px; overflow:hidden}
+.rp-strip .rpb{flex:1 1 0; min-width:2px; border-radius:2px; background:var(--line); opacity:.5;
+  transition:opacity var(--dur-fast), transform var(--dur-fast), background var(--dur-fast)}
+.rp-strip .rpb.lit{opacity:1}
+.rp-strip .rpb.cur{transform:scaleY(1.7); opacity:1}
+
+/* ── 动作日志：最新一行高亮滑入 ── */
+.al-new{animation:aNewRow var(--dur-slow) var(--ease-out) both}
+@keyframes aNewRow{from{background:var(--accent-soft); transform:translateX(-10px); opacity:.4}
+  to{background:transparent; transform:none; opacity:1}}
+
+/* ── 状态栏帧率徽标（T8 性能矩阵的可观测面） ── */
+.fps-badge{font-size:10px; padding:0 5px; border-radius:4px; border:1px solid var(--line);
+  color:var(--ink3); font-variant-numeric:tabular-nums}
+.fps-badge.warn{color:var(--warn); border-color:var(--warn)}
+.fps-badge.bad{color:var(--bad); border-color:var(--bad)}
+
+/* ── 留白修正（T6-3/4）：评分卡垂直居中、时间线卡片收紧 ── */
+.grid2>.card{display:flex; flex-direction:column}
+.grid2>.card>.ringbox{margin:auto 0}
+.ringbox{gap:22px}
+#tl-body .card{margin-bottom:10px}
+.tl-side{display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:10px}
+@media (max-width:1100px){ .tl-side{grid-template-columns:1fr} }
+
+/* 图例/提示里的小图标与文案对齐 */
+.faint .ico{vertical-align:-.22em; margin-right:4px}

@@ -40,7 +40,9 @@ var Charts = {
       if (gi < 0) return;
       var y = top + gi * laneH + laneH / 2;
       var x = X(r.ts);
-      svg += '<g class="swim-ev" data-ev="' + idx + '" style="cursor:pointer">' +
+      // 顺序入场：错峰（按时间序）淡入位移；时间跨度大时收敛上限，避免末段等太久
+      var delay = Math.min(idx * 14, 620);
+      svg += '<g class="swim-ev" data-ev="' + idx + '" style="cursor:pointer; animation-delay:' + delay + 'ms">' +
         '<rect x="' + (x - 2.2) + '" y="' + (y - 7) + '" width="4.4" height="14" rx="2" fill="' + self.gateCol[r.table] + '"/>' +
         '<rect x="' + (x - 7) + '" y="' + (y - 10) + '" width="14" height="20" fill="transparent"/></g>';
     });
@@ -137,8 +139,18 @@ var Charts = {
       '<input id="rp-slider" type="range" min="0" max="' + (flow.length - 1) + '" value="0" style="flex:1">' +
       '<span id="rp-pos" class="faint" style="min-width:150px;text-align:right">—</span>' +
       '</div>' +
-      '<div id="rp-event" class="rp-event"><span class="faint">拖动滑块或点播放——逐事件点亮生态演化。</span></div>';
+      '<div id="rp-event" class="rp-event"><span class="faint">拖动滑块或点播放——逐事件点亮生态演化。</span></div>' +
+      '<div class="rp-strip" id="rp-strip" title="事件带：随回放进度逐块点亮（颜色=所属门）"></div>';
     var slider = $('#rp-slider', mountEl), posEl = $('#rp-pos', mountEl), evEl = $('#rp-event', mountEl);
+    // 事件带：每事件一块，回放推进时 0..idx 点亮（当前块放大）——"时间在流动"的直观呈现
+    var strip = $('#rp-strip', mountEl);
+    var blocks = flow.map(function (r) {
+      var b = document.createElement('i');
+      b.className = 'rpb';
+      b.style.background = self.gateCol[r.table];
+      strip.appendChild(b);
+      return b;
+    });
 
     function show(i) {
       idx = Math.max(0, Math.min(flow.length - 1, i));
@@ -148,6 +160,9 @@ var Charts = {
       evEl.innerHTML = '<i class="gdot" style="background:' + self.gateCol[r.table] + '"></i>' +
         '<b>' + esc(r.action) + '</b> <span class="tag">' + esc(self.gateName[r.table]) + '</span> ' +
         esc(r.target || '') + (r.note ? ' <span class="faint">' + esc(r.note.slice(0, 100)) + '</span>' : '');
+      for (var bi = 0; bi < blocks.length; bi++) {
+        blocks[bi].className = 'rpb' + (bi < idx ? ' lit' : '') + (bi === idx ? ' cur' : '');
+      }
       if (onEvent) onEvent(r, idx / Math.max(1, flow.length - 1));
     }
     function step() {

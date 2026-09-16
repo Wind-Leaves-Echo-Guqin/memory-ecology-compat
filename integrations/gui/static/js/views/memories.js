@@ -1,7 +1,13 @@
 /* ============================================================
-   views/memories.js — 记忆库（v0.3：沿用 v0.2 三层结构，接新 api 层）
+   views/memories.js — 记忆库 v0.3.3（T2 形象化动效）
+   · 条目卡错峰入场；轮询刷新只让"变化的条目"动画（签名比对），其余不动
+   · 水位条：未越线缓慢流动高光；越线保留 pulse 呼吸并加强层次
+   · 状态徽章颜色过渡 + 变化时微缩放（.flip）
+   · 隔离区低温视觉（淡蓝霜渐变）；长列表惰性入场（IntersectionObserver）
    ============================================================ */
 'use strict';
+
+const MemSeen = { init: false };
 
 RENDER.memories = async function (v) {
   const [l1, l2, aux] = await Promise.all([
@@ -20,7 +26,7 @@ RENDER.memories = async function (v) {
   const wm = (m, id) => {
     const over = m.chars > m.quota, pct = Math.min(100, m.chars / m.quota * 100);
     return `<div class="water" style="margin-bottom:12px"><div class="bar">
-      <div class="fill" style="width:${pct}%"></div>
+      <div class="fill${over ? ' over-fill' : ''}" style="width:${pct}%"></div>
       ${over ? `<div class="over" style="left:${100 - (m.chars / m.quota - 1) * 100}%; width:${(m.chars / m.quota - 1) * 100}%"></div>` : ''}
       </div><div class="legend"><span>${id} <b class="num">${m.chars}</b> 字 / ${m.quota}（去空白口径）</span>
       <span style="${over ? 'color:var(--bad);font-weight:600' : 'color:var(--ink3)'}">${over ? '已越线' : '未越线'} · ${m.entries.length} 条</span></div></div>`;
@@ -36,16 +42,16 @@ RENDER.memories = async function (v) {
           <div id="l1-list">${mem.entries.map(e => l1Entry(e)).join('')}</div>
         </div>
         <div class="card frozen"><h3>隔离区 <small>superseded 旧条目 · 永不物理删除</small></h3>
-          ${aux.quarantine.length ? aux.quarantine.map(f => `<div class="l1-entry">${esc(f.name)}</div>`).join('')
+          ${aux.quarantine.length ? aux.quarantine.map(f => `<div class="l1-entry" data-lazy>${esc(f.name)}</div>`).join('')
             : '<div class="empty-ok">暂无实例 —— 0 条 superseded，这是健康状态（机制在，矛盾未发生）。</div>'}
         </div>
         <div class="card"><h3>待处理区 <small>提取产出 → 门①消费（.done 已排除）</small></h3>
           ${aux.pending.length ? aux.pending.map(f => `
-            <div class="l1-entry"><b>${esc(f.name)}</b> <span class="faint">${esc(f.mtime.slice(0, 16))}</span>
+            <div class="l1-entry" data-lazy><b>${esc(f.name)}</b> <span class="faint">${esc(f.mtime.slice(0, 16))}</span>
             <div class="faint" style="font-size:11.5px;margin-top:3px">${esc(f.preview.slice(0, 120))}…</div></div>`).join('')
             : '<div class="empty-ok">空 —— 门①已消化完候选（目录有进有出）。</div>'}
           <h3 style="margin-top:14px">画像候选 <small>门③观察期</small></h3>
-          ${aux.user_candidates.length ? aux.user_candidates.map(f => `<div class="l1-entry">${esc(f.name)}</div>`).join('')
+          ${aux.user_candidates.length ? aux.user_candidates.map(f => `<div class="l1-entry" data-lazy>${esc(f.name)}</div>`).join('')
             : '<div class="empty-ok">空 —— 尚无达观察期的稳定特质。</div>'}
         </div>
       </div>
@@ -61,18 +67,34 @@ RENDER.memories = async function (v) {
           <span class="faint">筛选后 ${items.length} 条</span>
         </div>
         ${items.length ? `<table><tr><th>条目</th><th>type</th><th>status</th><th>occ</th><th>首见</th><th>最近核验</th><th>双时态</th></tr>
-          ${items.map(x => `<tr class="click" data-slug="${esc(x.slug)}">
+          ${items.map(x => `<tr class="click mem-row" data-lazy data-slug="${esc(x.slug)}" data-sig="${esc(x.slug + '|' + x.occ + '|' + x.status + '|' + (x.verified || ''))}">
             <td class="ellipsis" style="max-width:330px">${esc(x.slug)}
               ${x.origin === 'extrude-from-L1' ? '<span class="faint" title="由 L1 挤出沉淀">⇩挤出</span>' : ''}
               ${x.superseded_by ? '<span class="tag bad">被取代</span>' : ''}</td>
             <td><span class="tag">${esc(x.type)}</span></td>
-            <td><span class="tag ${x.status === 'active' ? 'ok' : 'bad'}">${esc(x.status)}</span></td>
+            <td><span class="tag ${x.status === 'active' ? 'ok' : 'bad'}" data-tag="${esc(x.status)}">${esc(x.status)}</span></td>
             <td class="num">${x.occ ?? '—'}</td><td>${esc(x.first || '—')}</td><td>${esc(x.verified || '—')}</td>
             <td class="faint" style="font-size:11px">${esc((x.valid_time || '—') + ' / ' + (x.transaction_time || '—').replace('T', ' ').slice(0, 16))}</td>
           </tr>`).join('')}</table>`
-          : '<div class="empty">筛选结果为空 —— 放宽条件试试。</div>'}
+          : Icons.empty('memories', '筛选结果为空', '放宽条件试试——type / status / 排序组合里至少留一个"全部"。')}
       </div>
     </div>`;
+
+  // ── 入场与"只动画变化项"：签名比对（slug+occ+status+verified），未变化的不动 ──
+  const fresh = [];
+  $$('.mem-row', v).forEach(tr => {
+    const key = 'mem:' + tr.dataset.slug;
+    const changed = Anim.changed(key, tr.dataset.sig);
+    if (!MemSeen.init || changed) fresh.push(tr);
+    if (changed) {
+      const tag = $('[data-tag]', tr);
+      if (tag) Anim.pulse(tag, 'flip', 900);
+    }
+  });
+  const freshL1 = $$('#l1-list .l1-entry').filter(el => !MemSeen.init || Anim.changed('l1:' + el.textContent.slice(0, 40), el.textContent));
+  MemSeen.init = true;
+  Anim.markNew(fresh.concat(freshL1));
+  Anim.lazyIn(v);
 
   // L1 双 tab
   function l1Entry(e) {
@@ -90,6 +112,7 @@ RENDER.memories = async function (v) {
     $('#l1-list').innerHTML = m.entries.map(e => l1Entry(e)).join('');
     $$('.l1-tabs button').forEach(b => b.classList.toggle('on', b.dataset.l1 === key));
     bindL1();
+    Anim.markNew($$('#l1-list .l1-entry'));
   };
   bindL1();
   $$('.l1-tabs button', v).forEach(b => b.onclick = () => showL1(b.dataset.l1));
