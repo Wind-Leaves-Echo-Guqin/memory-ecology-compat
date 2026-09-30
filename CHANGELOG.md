@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.2.4（2026-09-30）
+
+- 新增 dsh 官方桌面版（cordis patch 层）适配器 `integrations/dsh/package-cordis/`：
+  `agent/pre-step` 报错根因注入 + `eco_note_query` / `eco_note_error_query` 原生工具，
+  官方 `dsh plugin --profile desktop add` 路径安装，宿主包运行期动态解析，fail-open 只读
+- 发布集扩展：package-cordis 三件（package.json / index.js / cordis.patch.yml）随发
+- EAC Extension SDK 适配器（`package/`）保持不变；Python 侧单源共用
+- 核心脚本零改动（与生产树 v2.2.0 内容一致，对齐核查 2026-09-30）
+
 ## v2.2.3（2026-09-16）
 
 - 观测舱 GUI v0.3.3：技能星图双形态（3D WebGL 玻璃球体 + 简单光追 / 2D 力导向平铺深空玻璃版）、

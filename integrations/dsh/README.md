@@ -1,7 +1,49 @@
 # eco-note-dsh · 记忆生态 dsh 适配器
 
-让 dsh（DeepSeek Harness EAC，cordis 插件体系）成为记忆生态的第二个宿主：
+让 dsh 成为记忆生态的第二个宿主：
 **报错时按根因自动注入相关经验 + 原生经验查询工具**。Python 核心（四道门/经验笔记本）零改动。
+
+**两个插件包，对应 dsh 的两套插件体系**（2026-09-30 实测）：
+
+| 包 | 宿主 | 插件体系 | 状态 |
+|---|---|---|---|
+| `package/`（本目录） | dsh EAC 变体（VNext Extension SDK） | `activate(ctx)` + `provideContext`/`registerTool` | 按 EAC 体系工作 |
+| `package-cordis/` | **dsh 官方桌面版**（cordis patch 层） | `agent/pre-step` 注入 + `ctx.tools.register(defineTool)` | ✅ 已在官方运行时端到端验证 |
+
+Python 侧单源共用：`package-cordis` 直接复用 `package/python/`，零复制。
+
+## package-cordis（官方桌面版）速览
+
+- **通道**：注入 = `agent/pre-step` 拦截（照抄官方 dsh-time-context 模式）每步 spawn
+  `eco_note_dsh_context.py`，命中则 append 插件署名 user message；工具 =
+  `eco_note_query` / `eco_note_error_query`（spawn 核心 scripts 的检索 CLI，Q28 同源教训）。
+- **安装**：`dsh plugin --profile desktop add <本目录>/package-cordis`（声明了 `dsh.bundle`，
+  官方 CLI 不再报 plain-dependency 警告，进组合树激活）。
+- **配置**：patch config（camelCase）或同名环境变量：`memoryEcologyRoot` / `ecoScriptsDir` /
+  `ecoPython` / `pythonDir` / `hostModulesDir` / `jsThrottleMs`（JS 兜底节流，默认 60000ms，
+  0=每步都探；权威窗口/冷却 10min/15min 仍在 Python 状态机）。共享根机器需设
+  `memoryEcologyRoot` 指向主宿主数据根（本机：desktop/headless 两 profile 的
+  `cordis.patch.yml` 已有 `# --- eco-note managed ---` 标记块）。
+- **宿主包动态解析**：`link:` 安装的包从仓库真实路径加载，Node 裸导入走不到宿主依赖树；
+  插件运行期用 `createRequire` 从 `~/.dsh/profiles/node_modules`（或 `DSH_HOME`/
+  `hostModulesDir`）定位 `@deepseek-ai/dsh-tools` 与 `@deepseek-ai/dsh-llm` 后 `import()`。
+  `tools.register` 只做结构校验、`createUserMessage` 是纯工厂——跨实例安全。
+- **验证结论（2026-09-30，headless profile 实测）**：
+  1. `dsh --dump-config` 组合树出现 `== eco-note-dsh-cordis` 且带配置 → 激活；
+  2. agent 调用 `eco_note_query` 命中共享根真实条目 → 工具通道通；
+  3. 同会话内"造错→下一步"后 agent 确认收到【经验参考】独立 user 消息，且
+     `experiences/.dsh_inject_state.json` 落盘 → 注入通道通。
+- **已知边界**：
+  - 探针只扫"最新 mtime 的一个会话"（Python 侧 Q35 防跨会话串扰设计）——
+    同会话多回合的桌面版主用例正常；headless 一任务一进程时，上一任务的报错
+    不会注入到下一任务（设计内，非故障）。
+  - patch 用户层若是内联空数组 `[]` 开头，追加块序列条目会导致 YAML 解析失败
+    （headless profile 踩过：删掉 `[]` 行即可）。
+- **回滚**：`dsh plugin --profile desktop remove eco-note-dsh-cordis` +
+  删 profile `cordis.patch.yml` 里的 `# --- eco-note managed ---` 块
+  （备份：`*.bak-ecotest-20260930`）。
+
+## package（EAC 变体）原说明
 
 ## 能力
 

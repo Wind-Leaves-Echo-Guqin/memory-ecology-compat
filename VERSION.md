@@ -1,5 +1,17 @@
 # Memory Ecology Compat · 版本
 
+- **v2.2.4**（2026-09-30）——dsh 官方桌面版适配器（集成层新增，核心脚本零改动）
+  - **新增 `integrations/dsh/package-cordis/`**：dsh 官方桌面版（cordis patch 层）适配器——
+    `dsh plugin --profile desktop add` 官方路径安装；`agent/pre-step` 每步注入（照官方
+    dsh-time-context 模式）+ `ctx.tools.register(defineTool)` 双工具（照官方 dsh-tool-todo 契约）；
+    host 端运行期动态解析 `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-llm`（link: 安装的包
+    裸导入解析不到宿主依赖树）；JS 侧兜底节流可配（`jsThrottleMs`，默认 60s，权威窗口/冷却
+    10min/15min 仍在 Python 状态机）；已在官方运行时端到端实测（工具检索命中 + 注入落盘）
+  - `package/`（EAC Extension SDK 适配器）不变；Python 侧两包单源共用（package-cordis 零复制）
+  - 同步结论（2026-09-30 对齐核查）：兼容版核心与生产树 v2.2.0 **内容一致**（diff 全量
+    仅 EOL/bytecode 差异，EOL 归一仍属 v3 单源化批次）
+  - 实机环境：dsh 官方桌面版 desktop/headless 两 profile 已部署并配置共享数据根
+
 - **v2.2.3**（2026-09-16）
 - 观测舱 GUI v0.3.3 视觉深化与形象化动效：
   · 技能星图双形态：**3D 星空**（本地 Three.js r160，无 CDN，懒加载）玻璃球体 =

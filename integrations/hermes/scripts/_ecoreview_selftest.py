@@ -18,7 +18,9 @@ SCRIPT = hermes_root() / "scripts" / "eco_review.py"
 src = SCRIPT.read_text(encoding='utf-8')
 ast.parse(src)
 print("[1] AST parse OK; BOM literal count =", src.count('\ufeff'))
-assert src.count('\ufeff') == 2, 'rewrite_status 里应有两个 BOM 字面量'
+# 2026-09-27 随 C 接线更新：BOM/frontmatter 解析已单源到 lib/memstore（转义 \ufeff），
+# 本文件不再要求源码含字面 BOM——改为钉「零字面 BOM」（编码卫生，字面 BOM 易被工具破坏）
+assert src.count('\ufeff') == 0, 'eco_review 源码不应再含字面 BOM 字符（解析已单源 memstore）'
 
 # ---------- 2. 构造 fixture ----------
 tmp = Path(tempfile.mkdtemp(prefix='eco_review_selftest_'))
@@ -35,21 +37,25 @@ today = date.today()
 
 
 def write_detail(name, type_, status, lv, body):
-    (detail / name).write_text(
+    """2026-09-27（G1 修正）：name 一律无后缀（真实生态里 frontmatter name 由
+    write_gate.slug_of 生成、从不带 .md）——文件名由本函数补 .md。
+    此前 fixture 把 'act-over-1.md' 整个写进 name:，连锁出「merge 输出带后缀、
+    归档目标变 dorm-over.md.md」的假断言失败。"""
+    (detail / f"{name}.md").write_text(
         f"---\nname: {name}\ntype: {type_}\nstatus: {status}\n"
         f"last_verified: {lv}\n---\n{body}\n", encoding='utf-8')
 
 
-write_detail('act-over-1.md', 'semantic', 'active',
+write_detail('act-over-1', 'semantic', 'active',
              (today - timedelta(days=200)).isoformat(),
              '训练任务固定使用 .venv312 解释器')
-write_detail('act-over-2.md', 'episodic', 'active',
+write_detail('act-over-2', 'episodic', 'active',
              (today - timedelta(days=100)).isoformat(),
              '训练任务固定使用 .venv312 解释器')
-write_detail('dorm-over.md', 'lesson', 'dormant',
+write_detail('dorm-over', 'lesson', 'dormant',
              (today - timedelta(days=240)).isoformat(),
              '旧课程记忆：Windows glob 需要去重')
-write_detail('fresh.md', 'semantic', 'active',
+write_detail('fresh', 'semantic', 'active',
              (today - timedelta(days=5)).isoformat(),
              '新记忆内容示例')
 
@@ -114,8 +120,9 @@ assert (arch / '2026-01-01' / 'q-old-1.md').exists()
 assert (arch / '2026-01-01' / 'q-old-2.md').exists()
 assert (quar / '2026-07-01' / 'q-fresh.md').exists()  # 未超期保留
 assert (quar / '2026-01-01' / 'q-old-1.md').exists() is False
-# eco.db
-dbp = mem / 'eco.db'
+# eco.db（2026-09-27 G1 修正）：resolve_paths 的根重定位语义 = --detail 的上两级为
+# 生态根（<root>/memories/detail → root=tmp），eco.db 落生态根——与生产 hermes/eco.db 同构
+dbp = tmp / 'eco.db'
 assert dbp.exists()
 conn = sqlite3.connect(str(dbp))
 rows = conn.execute('SELECT action, COUNT(*) FROM review_log GROUP BY action').fetchall()

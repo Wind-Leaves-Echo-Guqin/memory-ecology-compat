@@ -14,12 +14,12 @@ import sys
 from pathlib import Path
 
 from lib.config import hermes_root
+from lib.metrics import MEMORY_TRIGGER as MEM_DISPLAY_MAX, chars_of, parse_l1  # 口径单源（PORT_SPEC §4-C）
 
 HERMES = hermes_root()
 REPO = HERMES / "ecosystem.git"
 OUT = HERMES / "VERSION.md"
-ECOSYSTEM_VERSION = "v2.2.0"  # ⑧ 版本行常量（生成器输出，防每日重建覆盖丢失）；2026-09-06 阶段 C 评测验收 + 安全写路径
-MEM_DISPLAY_MAX = 2550  # ⑧ v2.1.1：健康行记忆上限显示对齐 eco_quota 管理线 2550（原 2200 旧口径）
+ECOSYSTEM_VERSION = "v2.2.0"  # ⑧ 版本行常量（决策 21：v3.0.0 于架构升级完成时统一切换并移居 lib）
 JOBS = HERMES / "cron" / "jobs.json"
 EXEC_DB = HERMES / "cron" / "executions.db"
 
@@ -36,11 +36,11 @@ def main() -> int:
                            encoding="utf-8", errors="replace", timeout=20)
         if r.returncode == 0 and r.stdout.strip():
             git_commit = r.stdout.strip()
-            git_ok = "✓" if r.stdout.startswith(("8", "9", "a", "b", "c", "d", "e", "f")) else "?"
-        # 当日提交检查
-        r2 = subprocess.run(["git", "-C", str(REPO), "log", "-1", "--format=%ad", "--date=short"],
-                            capture_output=True, text=True, encoding="utf-8", timeout=20)
-        today_ok = "✓" if (r2.stdout.strip() == today) else "✗ 无当日提交"
+            # Q17 修复（2026-09-06）：原为首字符 ∈ 8-9a-f 的假检查（0-7 开头恒 ？，
+            # 快照停摆也显示 ✓）——改为真检查：最新快照日期 == 今天才 ✓
+            # （顺带删除原 r2/today_ok 死变量——算出后从未被健康行引用）
+            last_date = git_commit.split(" ")[1] if " " in git_commit else ""
+            git_ok = "✓" if last_date == today else "✗ 无当日提交"
     except Exception as e:
         git_ok = f"✗ {e}"
 
@@ -82,10 +82,18 @@ def main() -> int:
     prev = ""
     if OUT.exists():
         prev = OUT.read_text(encoding="utf-8", errors="replace")
-        # 保留旧健康行（追加）
+        # 保留旧健康行（追加）。Q18 修复（2026-09-06）：原逻辑把旧行整体插到新表头之前
+        # （孤儿行 + 双表并存 + 永不去重）——改为同日去重（保留最新）并入新表头之后
         if "| 20" in prev:
-            old_rows = [l for l in prev.splitlines() if l.startswith("| 20")]
-            lines = lines[:7] + old_rows + lines[7:] if old_rows else lines
+            seen: dict[str, str] = {}
+            for l in prev.splitlines():
+                if l.startswith("| 20") and not l.startswith(f"| {today} "):
+                    seen[l.split("|")[1].strip()] = l
+            if seen:
+                # 审查 note 加固：分隔行缺失时不再 StopIteration（当前表结构恒在，防未来重构）
+                sep = next((i for i, l in enumerate(lines) if l.startswith("|---")), None)
+                if sep is not None:
+                    lines = lines[:sep + 2] + list(seen.values()) + lines[sep + 2:]
 
     OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"✅ VERSION.md 已更新: {line}")
@@ -97,7 +105,8 @@ def _mem_pct() -> str:
         p = HERMES / "memories" / "MEMORY.md"
         # T0-Q3 修复（2026-09-05）：len() 本身即字符数，原 `n // 3` 把水位假报成 1/3
         # （2941 字符已超 2550 线却显示 980），超限监控永不触发。回归：test_eco_version.py
-        n = len(p.read_text(encoding="utf-8", errors="replace"))
+        # 口径单源（PORT_SPEC §4-C）：分子从 len(raw) 改为门②同口径（审查 note 6 补齐）
+        n = chars_of(parse_l1(p.read_text(encoding="utf-8", errors="replace"))[0])
         return f"{n}字/~{MEM_DISPLAY_MAX}"
     except Exception:
         return "?"

@@ -14,37 +14,30 @@
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from pathlib import Path
 
 from lib.config import hermes_root
+from lib.memstore import parse_experience  # §C：解析单源
+
+try:  # v0.3：子进程/管道下 stdout 走 GBK 会导致中文乱码，显式固定 UTF-8
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 HERMES = hermes_root()
 EXP_DIR = HERMES / "experiences"
 
 
 def _parse_entry(path: Path) -> dict | None:
-    """解析 exp-*.md：frontmatter（--- 块，key: value）+ 正文（title:/symptom:/...）。"""
+    """解析 exp-*.md：frontmatter（--- 块，key: value）+ 正文（title:/symptom:/...）。
+
+    解析单源 memstore.parse_experience（原本地实现已逐字上收，零行为差异）。"""
     try:
         raw = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    m = re.match(r"^---\n(.*?)\n---\n(.*)$", raw, re.S)
-    if not m:
-        return None
-    meta = {}
-    for line in m.group(1).splitlines():
-        fm = re.match(r"^(\w+):\s*(.*)$", line)
-        if fm:
-            meta[fm.group(1)] = fm.group(2)
-    body = m.group(2)
-    fields: dict[str, str] = {}
-    for line in body.splitlines():
-        fm = re.match(r"^(\w+):\s*(.*)$", line)
-        if fm:
-            fields[fm.group(1)] = fm.group(2)
-    return {"meta": meta, "body": body, "fields": fields, "full": raw}
+    return parse_experience(raw)
 
 
 def _norm(s: str) -> str:
@@ -92,8 +85,21 @@ def main() -> int:
     ap.add_argument("keyword", help="检索关键词（子串匹配）")
     ap.add_argument("--full", action="store_true", help="输出完整正文")
     ap.add_argument("--top", type=int, default=3, help="最多返回条数（默认 3，同 episode 折叠）")
+    ap.add_argument("--format", choices=["text", "json"], default="text", help="输出格式（PORT_SPEC §4-C 类型化契约）")
     args = ap.parse_args()
     results = search(args.keyword, top=args.top, full=args.full)
+    if args.format == "json":
+        import json
+        items = []
+        for h in results:
+            m = h["entry"]["meta"]
+            items.append({
+                "id": h["path"], "type": m.get("type", "?"), "status": m.get("status", "?"),
+                "title": h["entry"]["fields"].get("title", ""), "evidence": h["entry"]["fields"].get("evidence", ""),
+                **({"full": h["entry"]["full"]} if args.full else {}),
+            })
+        print(json.dumps({"ok": True, "query": args.keyword, "total": len(items), "hits": items}, ensure_ascii=False, indent=2))
+        return 0
     if not results:
         print(f"未命中：{args.keyword}")
         return 1

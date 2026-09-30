@@ -38,6 +38,7 @@ import collector  # noqa: E402
 import runner      # noqa: E402
 
 STATIC = HERE / "static"
+V2_DIST = HERE.parent / "gui-v2" / "dist"  # gui-v2 构建产物（决策 28 预览版；dist 不入库，npm run build 重新生成）
 _MIME = {".html": "text/html", ".css": "text/css", ".js": "text/javascript",
          ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon",
          ".woff2": "font/woff2", ".json": "application/json"}
@@ -232,9 +233,44 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _static(self, rel: str):
-        p = (STATIC / rel).resolve()
-        if not str(p).startswith(str(STATIC.resolve())) or not p.is_file():
+    _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+    def _host_ok(self) -> bool:
+        """防 DNS rebinding：恶意网页把域名解析到 127.0.0.1 时 Host 头是攻击者域名，
+        客户端地址仍是回环——必须解析 Host 并精确比对主机名（startswith 会被
+        localhost:8788.evil.com 之类畸形形态放行，审查 minor 修复）。"""
+        host = (self.headers.get("Host") or "").strip().lower()
+        if host.startswith("["):  # IPv6 字面量：[::1]:port
+            inner, _, rest = host[1:].partition("]")
+            if rest and not (rest.startswith(":") and rest[1:].isdigit()):
+                return False  # ] 后跟非端口垃圾（[::1]junk 形态）——审查 note 收紧
+            port = rest[1:] if rest.startswith(":") else ""
+        else:
+            inner, _, port = host.rpartition(":")
+            if not inner:  # 无冒号＝缺省端口形态
+                inner, port = host, ""
+        return inner in self._LOOPBACK_HOSTS and (port == "" or port.isdigit())
+
+    def _origin_ok(self) -> bool:
+        """写通道附加校验：Origin/Referer 缺省（本机 webview/脚本调用常见），
+        或其 hostname 精确为本机回环——子串匹配会被含 "localhost" 的攻击者域名
+        绕过（审查 blocker 修复），故 urlparse 后只认 hostname。"""
+        o = (self.headers.get("Origin") or self.headers.get("Referer") or "").strip()
+        if o == "":
+            return True
+        try:
+            u = urlparse(o)
+        except ValueError:
+            return False
+        return u.scheme in ("http", "https") and u.hostname in self._LOOPBACK_HOSTS
+
+    def _serve_file(self, root: Path, rel: str):
+        p = (root / rel).resolve()
+        try:  # commonpath 防兄弟目录前缀绕过（startswith 对 staticX 类目录名失效）
+            inside = os.path.commonpath([str(p), str(root.resolve())]) == str(root.resolve())
+        except ValueError:  # 跨盘符等不可比较情形一律视为越界
+            inside = False
+        if not inside or not p.is_file():
             self._json({"ok": False, "error": "not found"}, 404)
             return
         body = p.read_bytes()
@@ -244,6 +280,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _static(self, rel: str):
+        self._serve_file(STATIC, rel)
+
+    def _v2_static(self, rel: str):
+        """gui-v2 构建产物（决策 28 预览版）——与旧 static 同款越界防护。"""
+        self._serve_file(V2_DIST, rel)
 
     def do_GET(self):
         try:
@@ -271,6 +314,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # ── GET 路由 ──
     def _route(self):
+        if not self._host_ok():  # DNS rebinding 防护：Host 非本机回环一律拒绝
+            return self._json({"ok": False, "error": "forbidden host"}, 403)
         u = urlparse(self.path)
         path, qs = unquote(u.path), parse_qs(u.query)
 
@@ -278,6 +323,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._static("index.html")
         if path.startswith("/static/"):
             return self._static(path[len("/static/"):])
+        if path == "/v2" or path == "/v2/":
+            return self._v2_static("index.html")
+        if path.startswith("/v2/"):
+            return self._v2_static(path[len("/v2/"):])
         if not path.startswith("/api/"):
             return self._json({"ok": False, "error": "not found"}, 404)
 
@@ -384,7 +433,9 @@ class Handler(BaseHTTPRequestHandler):
         path, qs = unquote(u.path), parse_qs(u.query)
         if not path.startswith("/api/action/"):
             return self._json({"ok": False, "error": "not found"}, 404)
-        # 仅本机回环（服务本身只绑 127.0.0.1，此处双保险校验客户端地址）
+        # 三重防护：Host 校验（防 DNS rebinding）＋ Origin/Referer 校验 ＋ 客户端地址回环校验
+        if not self._host_ok() or not self._origin_ok():
+            return self._json({"ok": False, "error": "写通道仅限本机回环（Host/Origin 校验失败）"}, 403)
         client = self.client_address[0] if self.client_address else ""
         if client not in ("127.0.0.1", "::1"):
             return self._json({"ok": False, "error": "写通道仅限本机回环"}, 403)

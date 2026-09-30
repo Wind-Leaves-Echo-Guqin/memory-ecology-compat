@@ -123,6 +123,23 @@ def _split_entries(text: str) -> list[dict]:
     return parts
 
 
+def _metrics():
+    """口径单源（PORT_SPEC §4-C）：把生产 scripts/ 挂上 sys.path 后取 lib.metrics——
+    GUI 的 L1 计数与门②同源。探测失败返回 None（调用方回退近似口径，fail-open 不崩）。
+    注意：生产 scripts/lib 同步 metrics.py 之前（deploy-live 落地前），本函数在干净
+    进程中会走 None 分支——这是已知待办，不是 bug。"""
+    sd = scripts_dir()
+    if not sd:
+        return None
+    try:
+        if str(sd) not in sys.path:
+            sys.path.append(str(sd))  # 审查 m3：append 防止生产树遮蔽 GUI/stdlib 同名模块
+        import importlib
+        return importlib.import_module("lib.metrics")
+    except Exception:
+        return None
+
+
 def _l1_file(name: str) -> dict:
     root = data_root()
     p = root / "memories" / name
@@ -137,9 +154,18 @@ def _l1_file(name: str) -> dict:
     for e in entries:
         e["linked_slug"] = next((s for head, s in links.items()
                                  if head[:15] and head[:15] in e["text"]), None)
-    quota = 2550
-    m = re.search(r"(\d{3,4})$", name)  # 占位：配额线固定口径
-    return {"name": name, "chars": len(text.replace("\n", "").replace(" ", "")),
+    mtr = _metrics()
+    if mtr is not None:
+        try:  # 审查 n5：fail-open 契约守全——口径源存在但残缺时也回退，不打穿 scan 链
+            chars = mtr.chars_of(mtr.parse_l1(text)[0])
+            # 修复占位 bug：原对 MEMORY/USER 都硬编码 2550（USER 实际管理线 1275）
+            quota = mtr.MEMORY_TRIGGER if name.startswith("MEMORY") else mtr.USER_TRIGGER
+        except Exception:
+            mtr = None
+    if mtr is None:
+        chars = len(text.replace("\n", "").replace(" ", ""))  # 兜底近似（口径源不可达时）
+        quota = 2550 if name.startswith("MEMORY") else 1275  # 审查 m4：按名取线，不再一刀切
+    return {"name": name, "chars": chars,
             "raw_chars": len(text), "quota": quota, "entries": entries,
             "mtime": datetime.fromtimestamp(p.stat().st_mtime).isoformat(timespec="seconds") if p.exists() else None}
 

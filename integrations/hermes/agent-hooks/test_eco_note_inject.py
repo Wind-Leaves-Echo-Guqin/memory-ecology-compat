@@ -177,6 +177,41 @@ class InjectTest(unittest.TestCase):
         self.assertFalse(ei.maybe_auto_verify("exp-20260902-0003"))
         self.assertIn("status: draft", (self.exp / "exp-20260902-0003.md").read_text(encoding="utf-8"))
 
+    def test_shadow_decision_recorded_keep(self):
+        # 影子三态判定（PORT_SPEC §6，shadow 先行）：注入行为不变 + .inject_decisions.jsonl 记账
+        out = ei.handle(self._payload())
+        d = json.loads(out)
+        self.assertIn("context", d)  # 注入主流程不受影子影响
+        self.assertEqual(len(ei.read_events(".injected.jsonl")), 1)
+        decs = ei.read_events(".inject_decisions.jsonl")
+        self.assertEqual(len(decs), 1)
+        rec = decs[0]
+        # 统一 schema（inject_gate.format_jsonl）+ session 附加字段
+        for k in ("ts", "unit_id", "decision", "confidence", "reason", "signals", "session"):
+            self.assertIn(k, rec)
+        self.assertEqual(rec["unit_id"], "exp-20260902-0001")
+        self.assertEqual(rec["session"], "s1")
+        # 现状如此：verified 条目 → keep/high（verified 永不 drop）
+        self.assertEqual(rec["decision"], "keep")
+        self.assertEqual(rec["confidence"], "high")
+
+    def test_shadow_stale_draft_dropped(self):
+        # 现状如此：experiences 域唯一的可触发 drop 路径 = age>180d 且 status=draft
+        #（id 日期 exp-20260301 → NOW 2026-09-03 = 186 天）
+        stale = GOOD_ENTRY.replace("exp-20260902-0001", "exp-20260301-0001") \
+                          .replace("status: verified", "status: draft")
+        (self.exp / "exp-20260301-0001.md").write_text(stale, encoding="utf-8")
+        # 现状如此（钉住）：qy.search 的同 episode 折叠把无 source 条目的空串 episode
+        # 视为同组——同关键词命中的两条无 source 条目只留字典序第一条。单条目沙盒规避。
+        (self.exp / "exp-20260902-0001.md").unlink()
+        out = ei.handle(self._payload())
+        self.assertIn("context", json.loads(out))  # 影子模式下 drop 条目仍被注入（行为不变）
+        decs = ei.read_events(".inject_decisions.jsonl")
+        self.assertEqual(len(decs), 1)
+        self.assertEqual(decs[0]["unit_id"], "exp-20260301-0001")
+        self.assertEqual(decs[0]["decision"], "drop")
+        self.assertIn("stale_draft", decs[0]["signals"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

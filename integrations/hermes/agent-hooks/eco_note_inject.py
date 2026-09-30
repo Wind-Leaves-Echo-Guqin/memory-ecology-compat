@@ -16,6 +16,8 @@ L1 要点（cc 裁决 C + 拍板）：
 - 冷却：同会话 15 分钟内不重复注入（固定冷却窗口，防刷屏）
 - 事件账：experiences/.injected.jsonl（注入）+ experiences/.hits.jsonl（hit/miss）
          + experiences/.inject_poll_state.json（判定记账标记，Q16）
+- 影子判定（PORT_SPEC §6 批次 3，shadow 先行）：检索命中逐条过 lib/inject_gate 三态门，
+  结果只记账 experiences/.inject_decisions.jsonl，注入行为不变——积累数据供记分卡抽检
 
 测试后门（仅 ECO_NOTE_INJECT_TESTING=1 生效）：
   ECO_NOTE_INJECT_NOW       覆盖当前时间
@@ -27,6 +29,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 import sys
 import urllib.parse
 from pathlib import Path
@@ -43,6 +46,8 @@ import eco_note_signals as sig  # noqa: E402
 import eco_note_query as qy  # noqa: E402
 import eco_note_error_query as eq_  # noqa: E402
 from lib import safeio  # noqa: E402  # v2.2.0：条目写走安全写路径
+from lib.inject_gate import decide as gate_decide  # noqa: E402  # 三态判定（影子模式）
+from lib.inject_gate import format_jsonl as gate_format_jsonl  # noqa: E402
 
 HERMES_HOME = os.environ.get("HERMES_HOME", "") or os.path.expanduser(r"~\AppData\Local\hermes")
 
@@ -300,6 +305,46 @@ def build_injection_text(hits: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# 影子判定账本（experiences/ 域内）：与 .injected.jsonl 同目录——同一次注入的两个侧面，
+# 对账不分家（PORT_SPEC §6 原文的 memories/gate_log/ 位置按此域内一致性原则落定）
+SHADOW_LEDGER = ".inject_decisions.jsonl"
+
+
+def _created_from_id(unit_id: str):
+    """从条目 id（exp-YYYYMMDD-XXXX）提取创建日期；解析失败返回 None（fail-open）。"""
+    m = re.search(r"exp-(\d{8})-", unit_id or "")
+    if not m:
+        return None
+    try:
+        return datetime.datetime.strptime(m.group(1), "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
+def _shadow_decide(hits: list[dict], session_id: str, now: datetime.datetime) -> None:
+    """影子三态判定（shadow 先行）：检索命中逐条过 inject_gate，只记账、不改注入。
+
+    experiences 域现状：无 occurrences/last_seen 字段、无 quarantine、无命中遥测聚合——
+    相关入参一律缺省（gate 内 fail-open）。age_days 从条目 id 日期提取，status/entry_type
+    来自 frontmatter。任何异常吞掉并留痕（影子绝不影响注入主流程）。"""
+    try:
+        for h in hits:
+            meta = h["entry"]["meta"]
+            unit_id = str(h.get("path") or meta.get("id") or "")
+            created = _created_from_id(unit_id)
+            age_days = (now.date() - created).days if created else None
+            d = gate_decide(
+                entry_type=str(meta.get("type", "")),
+                age_days=age_days,
+                status=str(meta.get("status", "")),
+            )
+            rec = json.loads(gate_format_jsonl(d, unit_id=unit_id, ts=now.isoformat()))
+            rec["session"] = session_id
+            append_event(SHADOW_LEDGER, rec)
+    except Exception as exc:
+        _log_line({"ts": now.isoformat(), "warn": "shadow-decide-failed", "exc": repr(exc)[:200]})
+
+
 def handle(payload: dict) -> str:
     if not isinstance(payload, dict):
         return "{}"
@@ -362,6 +407,7 @@ def handle(payload: dict) -> str:
     hits.sort(key=lambda h: 0 if h["entry"]["meta"].get("status") == "verified" else 1)
     text = build_injection_text(hits)
     entry_ids = [h["path"] for h in hits]
+    _shadow_decide(hits, session_id, now)  # 影子三态判定：只记账，注入行为不变
     # v2.2.0：新增 chars（注入文本长度，INJ 判定线数据源）与 error（报错摘要，GOLD 重放查询）
     append_event(".injected.jsonl", {"ts": now.isoformat(), "session": session_id,
                                      "msg_id": err["msg_id"], "entry_ids": entry_ids,

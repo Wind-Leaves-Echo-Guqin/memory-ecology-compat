@@ -132,34 +132,68 @@ def main() -> int:
     dry = "--dry-run" in sys.argv
     existing = {p.stem for p in EXP_DIR.glob("exp-*.md")}
     date = _date.today().isoformat()
-    pending = PENDING_DIR / f"{date}.md"
-    if not pending.exists():
-        print("ℹ️ 今日无候选文件，无需接纳")
+
+    # 2026-09-27 修复（实战发现）：原实现只处理 PENDING_DIR/<今天>.md——
+    # 历史积压（本次实测 09-04 起 22 批）永远不会被接纳，管道看似"在跑"实则只吞当天。
+    # 改为：处理全部未接纳的 pending 文件（按文件名序=日期序），每文件各自日期生成 id。
+    all_pending = sorted(
+        p for p in PENDING_DIR.glob("*.md")
+        if p.name not in ("README.md", ".watermark")
+        and not p.name.endswith((".done.md", ".rejected.md", ".accepted.md"))
+        and p.name != ".watermark.md"
+    )
+    if not all_pending:
+        print("ℹ️ 无候选文件，无需接纳")
         return 0
-    cands = parse_pending_md(pending)
+
     accepted = 0
     rejected = 0
-    for c in cands:
-        eid = make_id(existing, date, c.get("trigger", ""))
-        existing.add(eid)
-        content = build_entry(c, eid)
-        if dry:
-            print(f"  -- 将接纳 [{c.get('type')}] {c.get('trigger', '')[:40]} → {eid}.md")
+    for pending in all_pending:
+        file_date = pending.stem if re.match(r"^\d{4}-\d{2}-\d{2}$", pending.stem) else date
+        cands = parse_pending_md(pending)
+        untouched = [c for c in cands if "." not in c.get("trigger", "")]
+        # 只接纳本文件里未标记的条目（已 accepted 的行由 parse_pending_md 原样读到，
+        # 但那些行有 <!-- accepted ... --> 前缀 → trigger 会带 '.'，据此跳过）
+        fresh = [c for c in cands
+                 if not _is_accepted_line(pending, c.get("trigger", ""))]
+        if not fresh:
             continue
-        # v2.2.0：条目写走安全写路径（schema 校验 + 原子写；原 write_text 非原子）
-        try:
-            # v2.2.0（R1）：per-candidate 异常隔离——单条坏候选（如 LLM type 非法）不再毒死整条接纳管道
-            safeio.write_entry(safeio.safe_entry_path(EXP_DIR, eid), content, kind="experience")
-            mark_accepted(pending, c.get("trigger", ""))
-            accepted += 1
-            print(f"  ✅ 接纳 [{eid}] {c.get('type')} {c.get('trigger', '')[:40]}")
-        except (ValueError, OSError) as e:
-            rejected += 1
-            print(f"  ⚠️ 拒纳 [{eid}] {c.get('trigger', '')[:40]}: {e}")
+        if len(all_pending) > 1:
+            print(f"── {pending.name}（{len(fresh)} 条未接纳）──")
+        for c in fresh:
+            eid = make_id(existing, file_date, c.get("trigger", ""))
+            existing.add(eid)
+            content = build_entry(c, eid)
+            if dry:
+                print(f"  -- 将接纳 [{c.get('type')}] {c.get('trigger', '')[:40]} → {eid}.md")
+                continue
+            try:
+                # v2.2.0（R1）：per-candidate 异常隔离——单条坏候选不再毒死整条接纳管道
+                safeio.write_entry(safeio.safe_entry_path(EXP_DIR, eid), content, kind="experience")
+                mark_accepted(pending, c.get("trigger", ""))
+                accepted += 1
+                print(f"  ✅ 接纳 [{eid}] {c.get('type')} {c.get('trigger', '')[:40]}")
+            except (ValueError, OSError) as e:
+                rejected += 1
+                print(f"  ⚠️ 拒纳 [{eid}] {c.get('trigger', '')[:40]}: {e}")
     if not dry:
         extra = f"，拒纳 {rejected} 条" if rejected else ""
         print(f"🏁 接纳完成：{accepted} 条{extra}（源 pending 已标记保留）")
+    _ = untouched  # 保留：未来若需「未标记统计」直接用
     return 0
+
+
+def _is_accepted_line(pending_path: Path, trigger: str) -> bool:
+    """该 trigger 所在行是否已被标记接纳（<!-- accepted ... --> 前缀）。"""
+    if not trigger:
+        return False
+    try:
+        for line in pending_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if trigger in line and line.lstrip().startswith("<!--"):
+                return True
+    except OSError:
+        pass
+    return False
 
 
 if __name__ == "__main__":

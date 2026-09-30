@@ -11,10 +11,13 @@ import sys
 from pathlib import Path
 
 from lib.config import hermes_root
+from lib.metrics import MEMORY_TRIGGER, chars_of, parse_l1
 
 EXEC_DB = hermes_root() / "cron" / "executions.db"
 JOBS = hermes_root() / "cron" / "jobs.json"
 PENDING = hermes_root() / "memories" / "pending"
+MEMORY = hermes_root() / "memories" / "MEMORY.md"
+MEM_LINE = MEMORY_TRIGGER  # 与配额门②触发线同源（PORT_SPEC §4-C 口径单源）
 
 
 def check_extract_output() -> list[str]:
@@ -42,10 +45,35 @@ def check_extract_output() -> list[str]:
     return alerts
 
 
+def check_memory_watermark() -> list[str]:
+    """记忆水位检查：MEMORY.md 按 eco_quota 门②同口径（chars_of）计数，
+    超触发线（配额 × 85%）即告警。
+
+    此前告警脚本每小时运行但不查水位——越线后只能等次日 12:25 配额门，
+    出现「GUI 黄条报越线、告警通道静默」的盲区（T3）。
+    v0.3 回填自 live 并升级：阈值与计数器从 eco_quota 同源导入，
+    替换 live 版的去空白口径与硬编码 2550（PORT_SPEC §2）。"""
+    alerts = []
+    try:
+        if MEMORY.is_file():
+            # parse_l1 返回 (entries, nl) 元组——先解包再计数（探针抓出的移植 bug）
+            entries, _nl = parse_l1(MEMORY.read_text(encoding="utf-8", errors="replace"))
+            chars = chars_of(entries)
+            if chars > MEM_LINE:
+                alerts.append(
+                    f"⚠️ 记忆水位越线: MEMORY.md {chars} 字符 > 触发线 {MEM_LINE}"
+                    f"（超 {chars - MEM_LINE}）——等待配额门挤出，或手动运行 python eco_quota.py"
+                )
+    except Exception as e:
+        alerts.append(f"⚠️ 记忆水位检查异常: {e}")
+    return alerts
+
+
 def main() -> int:
     # 产出探针最先执行（不依赖 cron DB，DB 异常也不影响探针生效）
     alerts = []
     alerts.extend(check_extract_output())
+    alerts.extend(check_memory_watermark())
 
     # cron 失败检测：瞬时锁/IO 异常降级为仅探针，绝不整脚本崩溃
     try:
@@ -77,7 +105,8 @@ def main() -> int:
     except Exception:
         pass
 
-    alerts = []
+    # Q14 修复（2026-09-06）：此处原为无条件 `alerts = []`，把上面产出探针的结果
+    # 清空——探针永远无法告警（8-29 事故盲区修复自身失效）。改为保留探针结果。
     for jid, execs in by_job.items():
         recent = execs[:2]  # started_at DESC 排序下取最近 2 次
         if len(recent) >= 2 and all(e[0] == "failed" for e in recent):

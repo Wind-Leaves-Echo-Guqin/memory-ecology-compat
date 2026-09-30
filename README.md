@@ -5,7 +5,7 @@
 复用同一套记忆生命周期治理与经验笔记本。
 
 > 派生声明：本项目为原 memory-ecology（Hermes 单宿主版）的兼容衍生线，独立仓库、独立演进；
-> 自 v2.1.2 起**两线核心功能完全一致、版本号同步**（当前 v2.2.3），本线只多出「多宿主化 +
+> 自 v2.1.2 起**两线核心功能完全一致、版本号同步**（当前 v2.2.4），本线只多出「多宿主化 +
 > 观测舱 GUI」这一集成层（核心脚本零改动）。
 
 ## English TL;DR
@@ -15,9 +15,9 @@ Memory Ecology Compat is the **multi-host derivative** of
 lifecycle governance toolkit that treats memories as an ecosystem: bounded, alive, and always reversible
 (four lifecycle gates + an experience notebook + quality gate evaluation, rule-driven, zero user maintenance,
 physical deletion disabled at code level). The portable core (`src/memory_ecology`) has **zero host
-dependencies**; host adapters live in `integrations/` (Hermes reference implementation, dsh Extension SDK
-plugin). Since v2.1.2 the two lines are feature-identical and version-aligned — this repo only adds the
-multi-host layer. MIT licensed.
+dependencies**; host adapters live in `integrations/` (Hermes reference implementation, dsh adapters
+for both the EAC Extension SDK and the official cordis-based desktop). Since v2.1.2 the two lines are
+feature-identical and version-aligned — this repo only adds the multi-host layer. MIT licensed.
 
 ## 兼容性说明（本仓库兼容了什么）
 
@@ -27,7 +27,7 @@ multi-host layer. MIT licensed.
 |---|---|---|
 | **可移植核心** | 任意能 spawn Python 子进程的宿主 | `src/memory_ecology`（四道门 + 经验笔记本 + 评测门禁）零宿主依赖，CLI / 脚本 / MCP 封装均可直接调用 |
 | **Hermes 适配层** | 上游 [memory-ecology](https://github.com/Wind-Leaves-Echo-Guqin/memory-ecology) 的宿主（参考实现全套） | `integrations/hermes/`：state.db 会话增量提取、pre_llm_call 报错注入 hook、cron 健康告警、基因库快照 |
-| **dsh 适配层** | dsh（DeepSeek Harness EAC）Extension SDK | `integrations/dsh/`：provideContext 报错根因注入（只读 + fail-open）+ `eco_note_query` / `eco_note_error_query` 原生只读工具 |
+| **dsh 适配层** | dsh 双插件体系 | `integrations/dsh/`：`package/`＝EAC 变体（Extension SDK `provideContext`/`registerTool`）；`package-cordis/`＝官方桌面版（cordis patch 层 `agent/pre-step` 注入 + `ctx.tools.register`）——均只读 + fail-open，报错根因注入 + `eco_note_query` / `eco_note_error_query` 原生只读工具 |
 | **观测舱 GUI** | 人类（本机浏览器 / pywebview 原生窗口） | `integrations/gui/`：本地可视化驾驶舱（只读观测 + 走确认闸门的写操作），数据根同上，仅绑 127.0.0.1 |
 | **共享数据根** | 多宿主并存 | 多宿主经 `MEMORY_ECOLOGY_ROOT` 指向同一条数据根即可共享记忆与经验；**单写入方纪律**保证四道门只有一个调度器 |
 
@@ -52,7 +52,7 @@ src/memory_ecology/     可移植核心（Python ≥3.10，零宿主依赖）
   ├── 四道门 + eco_note 可移植件 + lib/（config/fs/llm）
   └── test_*.py（fixture 隔离测试）
 integrations/hermes/    Hermes 参考集成层（state.db/cron 耦合件，适配器参考实现）
-integrations/dsh/       dsh 适配器（Extension SDK 插件：报错根因注入 + 原生查询工具）
+integrations/dsh/       dsh 适配器（package/＝EAC Extension SDK；package-cordis/＝官方桌面版 cordis）
 integrations/gui/       观测舱 GUI（可选：人类宿主适配器，本地可视化驾驶舱）
 ```
 
@@ -76,8 +76,12 @@ python eco_health_check.py
 
 ### 2) dsh 宿主
 
-见 [integrations/dsh/README.md](integrations/dsh/README.md)：Extension SDK 插件，
-报错时按根因自动注入经验，另注册两个原生查询工具。
+见 [integrations/dsh/README.md](integrations/dsh/README.md)：报错时按根因自动注入经验，
+另注册两个原生查询工具。两个插件包对应 dsh 的两套插件体系：
+
+- `package/`——EAC 变体（Extension SDK：`dsh plugin add` / `dev_inject_plugin`）
+- `package-cordis/`——官方桌面版（cordis patch 层：`dsh plugin --profile desktop add <package-cordis>`，
+  数据根经 profile 的 cordis.patch.yml 同 id 条目配 `memoryEcologyRoot`）
 
 ### 3) Hermes 宿主
 
@@ -117,7 +121,7 @@ cd src/memory_ecology
 python test_eco_gates.py              # 四门持久化回归
 python test_eco_note_error_query_v2.py  # 根因分层回归
 python test_eco_version.py            # 健康行口径回归
-node ../integrations/dsh/test_smoke.js   # dsh 适配器冒烟
+node ../../integrations/dsh/test_smoke.js   # dsh 适配器冒烟（cwd=src/memory_ecology，需退两级到仓库根）
 ```
 
 ## License

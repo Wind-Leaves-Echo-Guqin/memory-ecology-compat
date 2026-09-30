@@ -22,6 +22,11 @@ from collections import Counter
 
 import eco_note_query as eq
 
+try:  # v0.3：子进程/管道下 stdout 走 GBK 会导致中文乱码，显式固定 UTF-8
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 STOPWORDS = {
     "the", "and", "for", "with", "this", "that", "from", "was", "were", "are",
     "is", "not", "but", "you", "your", "have", "has", "had", "cannot", "can",
