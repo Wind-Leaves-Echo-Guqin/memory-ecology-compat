@@ -72,7 +72,14 @@ check('curatedEnv 丢弃凭据类变量、保留系统与生态命名空间', ()
     assert.strictEqual(env.DSH_FAKE_SESSION, 'sid-1');
     assert.strictEqual(env.ECO_FAKE_KNOB, 'k');
     assert.strictEqual(env.MEMORY_ECOLOGY_ROOT, '/tmp/root');
-    if (process.env.PATH) assert.strictEqual(env.PATH, process.env.PATH);
+    // Windows 大小写不敏感：环境块里的键常常写作 `Path` 而非 `PATH`
+    //（发布树实测踩到：写死 env.PATH 会 undefined）。按键名不敏感地比对值。
+    const pathKey = Object.keys(env).find((k) => k.toUpperCase() === 'PATH');
+    if (pathKey) {
+      assert.strictEqual(env[pathKey], process.env[pathKey]);
+    } else {
+      assert.ok(!process.env.PATH && !process.env.Path, 'PATH 在宿主里存在时，curatedEnv 必须透传它');
+    }
   } finally {
     delete process.env.MY_TEST_SECRET;
     delete process.env.DSH_FAKE_SESSION;
