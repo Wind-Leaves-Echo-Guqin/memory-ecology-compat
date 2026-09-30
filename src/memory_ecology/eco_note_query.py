@@ -10,11 +10,15 @@
 - 输出摘要行：id / type / status / trigger / evidence 首行（--full 时输出完整正文）
 
 验收口径（dsh 评审）：报错文本命中率抽样，而非全库精确检索。
+
+v2.2.5：加进程内解析缓存（(mtime,size) 失效）——错误检索按关键词逐个调本模块，
+未缓存时同一批条目被重复解析 20 遍（真机实测 504ms/次），是 dsh 注入探针的主要开销。
 """
 from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 from lib.config import hermes_root
@@ -40,6 +44,73 @@ def _parse_entry(path: Path) -> dict | None:
     return parse_experience(raw)
 
 
+# v2.2.5：库快照缓存。eco_note_error_query.rank() 对**每个关键词**调一次 search()，
+# 未缓存时 20 个关键词 × 237 条 ≈ 4700 次 文件读+解析+lower()（真机实测 504ms/次）；
+# 库增长后线性放大，最终撞上 dsh 适配器的 spawn 8s 上限（超时即静默不注入）。
+# 两级缓存：
+#   _FILE_CACHE   单文件解析结果，键 = (st_mtime_ns, st_size)（任何写入都会改 mtime）
+#   _LIB_SNAPSHOT 整库快照（条目 + 预算好的归一化 haystack），TTL 内不重复 stat/解析
+# TTL 只影响长驻进程感知新条目的延迟；CLI（每次调用新进程）恒为首次构建，语义不变。
+_FILE_CACHE: dict[str, tuple[int, int, dict | None]] = {}
+_LIB_SNAPSHOT: tuple[tuple, float, list[tuple[Path, dict, str, str]]] | None = None
+LIB_SNAPSHOT_TTL_S = 5.0
+
+
+def _cached_entry(path: Path) -> dict | None:
+    """解析 exp-*.md（带 (mtime,size) 失效的进程内缓存）。"""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    key = (st.st_mtime_ns, st.st_size)
+    hit = _FILE_CACHE.get(str(path))
+    if hit is not None and (hit[0], hit[1]) == key:
+        return hit[2]
+    entry = _parse_entry(path)
+    _FILE_CACHE[str(path)] = (key[0], key[1], entry)
+    return entry
+
+
+def _snapshot_key() -> tuple:
+    """快照键：目录身份 + 目录 mtime（新增/删除条目会改目录 mtime）。"""
+    try:
+        st = EXP_DIR.stat()
+    except OSError:
+        return (str(EXP_DIR), 0)
+    return (str(EXP_DIR), st.st_mtime_ns)
+
+
+def _library() -> list[tuple[Path, dict, str, str]]:
+    """整库快照 → [(path, entry, 归一化全文, episode 键)]。
+
+    键含 EXP_DIR 身份（调用方会改 eq.EXP_DIR 指向别的数据根）与目录 mtime；
+    TTL 到期后重建，重建时逐文件校验 (mtime,size) —— 长驻进程最多 5s 感知到
+    已有条目的原地修改；CLI（每次调用新进程）恒为首次构建，语义与无缓存一致。
+    """
+    global _LIB_SNAPSHOT
+    now = time.monotonic()
+    key = _snapshot_key()
+    if _LIB_SNAPSHOT is not None:
+        old_key, old_at, items = _LIB_SNAPSHOT
+        if old_key == key and (now - old_at) < LIB_SNAPSHOT_TTL_S:
+            return items
+    items: list[tuple[Path, dict, str, str]] = []
+    for path in sorted(EXP_DIR.glob("exp-*.md")):
+        entry = _cached_entry(path)
+        if entry is None:
+            continue
+        items.append((path, entry, _norm(entry["full"]), _episode_key(entry)))
+    _LIB_SNAPSHOT = (key, now, items)
+    return items
+
+
+def clear_cache() -> None:
+    """清空解析/快照缓存（测试与长驻进程显式失效用）。"""
+    global _LIB_SNAPSHOT
+    _FILE_CACHE.clear()
+    _LIB_SNAPSHOT = None
+
+
 def _norm(s: str) -> str:
     """归一化：小写 + 去首尾空白（中文直接保留子串匹配）。"""
     return s.strip().lower()
@@ -53,14 +124,10 @@ def _episode_key(entry: dict) -> str:
 def search(keyword: str, top: int = 3, full: bool = False) -> list[dict]:
     kw = _norm(keyword)
     hits: list[dict] = []
-    for path in sorted(EXP_DIR.glob("exp-*.md")):
-        entry = _parse_entry(path)
-        if entry is None:
-            continue
-        haystack = _norm(entry["full"])
+    for path, entry, haystack, episode in _library():
         if kw not in haystack:
             continue
-        hits.append({"path": path.stem, "entry": entry, "episode": _episode_key(entry)})
+        hits.append({"path": path.stem, "entry": entry, "episode": episode})
     # 同 episode 折叠：保留每个 episode 的第一条（按文件名字典序，即 id 序）
     seen: set[str] = set()
     folded: list[dict] = []

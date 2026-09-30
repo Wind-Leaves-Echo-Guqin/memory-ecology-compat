@@ -1,6 +1,6 @@
 {
   "name": "eco-note-dsh-cordis",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "记忆生态·兼容版 dsh 官方桌面版（cordis 体系）适配器：agent/pre-step 每步注入经验参考 + eco_note_query / eco_note_error_query 原生工具。Python 核心零侵入，fail-open。",
   "type": "module",
   "main": "index.js",

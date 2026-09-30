@@ -1,5 +1,38 @@
 # Memory Ecology Compat · 版本
 
+- **v2.2.5**（2026-09-30）——dsh 适配器审计修复（15 条），新增发布守卫
+  - **内核 v4 拒收修复（关键）**：注入消息 source.kind 由 `'plugin'` 改为 producer 自己的
+    名字（`'eco-note'`）。dsh 0.2.0-rc.2（hostProtocolVersion 4）的
+    `assertV4MessageSources` 会抛 `format v4 message requires a producer-owned source kind`；
+    官方 dsh-time-context/tmux-context 同款写法。v2.2.4 的发布物在 0.2.0-rc.2 上注入必被拒。
+  - 检索工具语义修正：stdout 优先 + 退出码分档（未命中 exit 1 ≠ 检索不可用）；
+    位置参数走 `--` 分隔（检索词以 `-` 开头不再被 argparse 当选项）；top 夹到 1..20
+  - 数据根默认值对齐核心 `lib/config.py`（开源 `src/memory_ecology` 布局下原会算成
+    `<repo>/src`，与核心认定的 `<repo>` 不一致 → 注入永远 no-hit）
+  - 子进程加固：解释器解析为绝对路径（堵 Windows 当前目录植入 `python.exe`，CWE-427）；
+    默认最小环境（只透传系统 + DSH_/ECO_/MEMORY_ECOLOGY_，`ECO_KEEP_FULL_ENV=1` 可退回）
+  - 会话定位改用 `agent.id` 精确匹配（原实现按 mtime 猜"当前会话"，并发会话会串扰）；
+    完全不像 id 的形态才回落 mtime；id 形态合法但文件未落盘也**不回落**（否则会拿到别的会话）
+  - 报错识别改"只认 tool/result + 强证据"：`message.isError` / `Traceback (most recent call last)`
+    / **独占一行**的非零 `[exit code: N]`。真机样本：原整行正则 19 条 tool/result 命中里只有
+    3 条是真失败（其余是读源码/写报告/引用文档）。残余路径已写明：agent 用 read 工具读一个
+    含 traceback 的日志文件仍会被当成失败（见 integrations/dsh/README 已知边界）
+  - 有界解压（流式 + 尾部 2MB + 总长 64MB 上限）；状态**每会话一个文件**（原全局单文件：
+    6 并发实测丢 4/6 桶 → 丢冷却与去重，同一 episode 每轮重复注入；旧文件兼容读 + 原子写）
+  - 注入载荷卫生：来源与非指令声明、哨兵/注入头中和、总长 1200 字上限；探针 reason 落日志
+    （cordis 与 EAC 两端），激活日志带宿主包版本（实测本机 profiles 里的 `@deepseek-ai/dsh-tools`
+    是 npm 全局 dsh 0.1.1-rc.2 的 junction，而内核是桌面版 0.2.0-rc.2——漂移进日志便于发现）
+  - 核心 `eco_note_query` 加库快照缓存（(mtime,size) 失效）：`rank()` 本机 237 条库 × 20 关键词
+    368ms → **31ms**（含首次解析全库）；同一进程内第二次 1ms。注意探针每步是新进程，故每步
+    实际开销 ≈150-200ms（其中解释器启动约 130ms），"2ms" 只适用于同进程重复调用
+  - 测试：新增 `test_common.js`（12 项）/ `test_cordis.mjs`（11 项，含 apply() 端到端）/
+    `test_eco_note_dsh_context_v4.py`（17 项，含 6 并发状态分片用例）；`run_tests.py` 改 glob
+    自动纳入 `test_*.js|mjs`；三处核心护栏缺依赖时**显式失败**而非静默跳过
+  - **发布守卫**：生成后自动校验（cordis source kind 不得为 `'plugin'`；JS 本地 import 必须
+    解析得到（先剥注释）；必需文件齐备（含两端 package.json 与 GUI/Hermes 入口）；发布物 .py
+    全部可编译；`from lib.X import` 的模块必须随发）；守卫与敏感词扫描**一律回滚**发布物
+    ——v2.2.4 曾因漏登记 lib 模块导致"发布树 import 全炸"，此后有人工清单但无守卫
+
 - **v2.2.4**（2026-09-30）——dsh 官方桌面版适配器（集成层新增，核心脚本零改动）
   - **新增 `integrations/dsh/package-cordis/`**：dsh 官方桌面版（cordis patch 层）适配器——
     `dsh plugin --profile desktop add` 官方路径安装；`agent/pre-step` 每步注入（照官方

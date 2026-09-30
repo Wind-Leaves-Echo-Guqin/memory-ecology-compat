@@ -121,8 +121,16 @@ cd src/memory_ecology
 python test_eco_gates.py              # 四门持久化回归
 python test_eco_note_error_query_v2.py  # 根因分层回归
 python test_eco_version.py            # 健康行口径回归
-node ../../integrations/dsh/test_smoke.js   # dsh 适配器冒烟（cwd=src/memory_ecology，需退两级到仓库根）
+
+# dsh 适配器（cwd=integrations/dsh；v2.2.5 起三件）
+cd ../../integrations/dsh
+node test_smoke.js                    # EAC：注册面 / fail-open / 探针 reason 日志
+node test_common.js                   # 子进程语义（退出码分档 / `--` 分隔 / 解释器绝对路径 / 最小环境）
+node test_cordis.mjs                  # 官方桌面版：纯函数 + apply() 端到端（假宿主包 + 桩 Python）
+python package/python/test_eco_note_dsh_context.py     # 会话提取→注入→冷却（legacy 日志格式）
+python package/python/test_eco_note_dsh_context_v4.py  # v4 结构化扫描 / 会话精确匹配 / 状态分片 / 载荷卫生
 ```
+（以上测试缺 python 或 zstandard 时会**显式失败**而不是静默跳过——它们是 v2.2.5 关键护栏。）
 
 ## License
 

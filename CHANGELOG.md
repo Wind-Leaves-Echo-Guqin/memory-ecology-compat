@@ -1,5 +1,31 @@
 # Changelog
 
+## v2.2.5（2026-09-30）
+
+- **修复（关键）**：dsh 内核 v4 拒收 `source.kind='plugin'` 的注入消息——改为 producer 自己的
+  名字 `'eco-note'`（官方 time-context/tmux-context 同款）。v2.2.4 的发布物在 dsh 0.2.0-rc.2
+  上注入通道必被拒收（`format v4 message requires a producer-owned source kind`）
+- 修复：检索工具"未命中（exit 1）"被报成"检索不可用"；检索词以 `-` 开头被 argparse 当选项；
+  `top` 非法值原样透传（现夹 1..20）
+- 修复：开源 `src/memory_ecology` 布局下数据根默认值算成 `<repo>/src`（核心认定 `<repo>`）→
+  注入永远 no-hit
+- 安全：解释器解析为绝对路径（CWE-427 当前目录植入）；子进程默认最小环境
+- 修复：会话定位改用 `agent.id` 精确匹配；冷却/节流按会话隔离（id 合法但文件未落盘也不借用别的会话）
+- 修复：报错识别只认 `tool/result` + 强证据（`message.isError` / Traceback / 独占一行的非零
+  `[exit code: N]`）。真机样本：原整行正则 19 条命中里只有 3 条真失败；**残余路径**：read 工具
+  读一个含 traceback 的日志文件仍会被当成失败（README 已知边界）
+- 修复：有界解压（流式；尾部 2MB + 总长 64MB 上限）；状态**每会话一个文件** + 原子写
+  （原单文件 RMW：6 并发实测丢 4/6 桶 → 丢冷却与去重）
+- 卫生：注入载荷加来源/非指令声明、中和哨兵、总长上限；探针 reason 两端都落日志（含 EAC）
+- 性能：核心 `eco_note_query` 库快照缓存（`rank()` 368ms → 31ms 冷；同进程第二次 1ms。
+  探针每步是新进程，故每步实际 ≈150-200ms）
+- 测试：新增 3 个测试文件（JS 23 项 + Python 17 项，含 6 并发状态分片用例）；`run_tests.py`
+  glob 自动纳入 JS 测试；核心护栏缺依赖时显式失败（不再静默 skip）
+- 工程：`publish_compat.py` 增发布守卫（source kind / JS 本地 import（先剥注释）/ 必需文件
+  （含两端 package.json + GUI/Hermes 入口）/ .py 可编译 / `from lib.X` 随发）；守卫与敏感词
+  扫描一律回滚；删掉重复定义的 `_norm_bytes`/`_deploy_sources` 死代码
+- 插件包版本 `0.1.0` → `0.1.1`（两端同步，装到机器上可区分代际）
+
 ## v2.2.4（2026-09-30）
 
 - 新增 dsh 官方桌面版（cordis patch 层）适配器 `integrations/dsh/package-cordis/`：

@@ -5,4 +5,4 @@ memories/
 experiences/
 *.db
 .env
-.dsh_inject_state.json
+.dsh_inject_state*.json
