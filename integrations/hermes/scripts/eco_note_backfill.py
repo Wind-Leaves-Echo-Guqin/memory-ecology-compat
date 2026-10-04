@@ -12,7 +12,7 @@
 - 信号过滤：仅 tool_error（与精确判定一致）；同会话相邻信号按 CTX 窗口合并成簇（省 LLM 调用）
 
 保守上限（防成本爆）：
-  --max-cands 单次最多候选数（默认 60）
+  --max-cands 单会话最多候选数（默认 60；多会话运行总量会随之累加）
   --max-clusters-per-session 单会话最多处理簇数（默认 30）
 
 用法:
@@ -50,8 +50,6 @@ def top_sessions(n: int) -> list[str]:
     conn.close()
     from collections import Counter
     c = Counter()
-    import threading
-    lock = threading.Lock()
     # 复用精确判定（读整库较慢但一次即可）
     conn = sqlite3.connect(f"file:{en.DB}?mode=ro", uri=True)
     for (sid,) in rows:
@@ -202,9 +200,14 @@ def main(argv: list[str] | None = None) -> int:
                 break
             frag = {"signal": {"type": "tool_error", "session_id": sid,
                                "msg_id": c["signal_msg_id"], "ts": 0.0, "snippet": ""},
-                    "ctx": en.fetch_context(sid, c["signal_msg_id"], en.CTX_BEFORE, en.CTX_AFTER)}
+                    # P1：与生产管道 eco_note.py 同口径——剥离经验注入回声行，
+                    # 防止已入库经验被回扫重新提取（自我污染循环）
+                    "ctx": en.strip_echo_lines(
+                        en.fetch_context(sid, c["signal_msg_id"], en.CTX_BEFORE, en.CTX_AFTER))}
             if not frag["ctx"]:
-                mark_processed(sid, c["signal_msg_id"])
+                # OCR 2026-10-03: mark_processed 移入非 dry-run 分支——dry-run 不留断点痕迹
+                if not args.dry_run:
+                    mark_processed(sid, c["signal_msg_id"])
                 continue
             if args.dry_run:
                 session_cands += 1
@@ -213,12 +216,15 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 items = en.llm_extract(frag["ctx"], max_tokens=args.max_tokens)
             except Exception as e:
-                print(f"    ⚠️ 簇 {c['signal_msg_id']} 提取失败: {e}，跳过该簇")
-                mark_processed(sid, c["signal_msg_id"])
+                # P1：提取失败不标记已处理——对齐 eco_note.py「异常≠无经验、不推进」语义，
+                # 断点续扫下轮重试（旧版 mark_processed 把瞬态故障变成永久静默跳过）
+                print(f"    ⚠️ 簇 {c['signal_msg_id']} 提取失败: {e}（不标记，下轮重试）")
                 continue
             got = 0
             for it in items:
-                t = (it.get("trigger") or "").replace("\n", " ").replace("**", "∗∗")
+                # OCR 2026-10-03: 先截断到落盘长度再做去重键——内存键与持久化键保持一致，
+                # 否则 >60 字符的 trigger 断点续跑时必然重复落盘
+                t = (it.get("trigger") or "").replace("\n", " ").replace("**", "∗∗")[:60]
                 if not t or t in seen_triggers:
                     continue
                 seen_triggers.add(t)

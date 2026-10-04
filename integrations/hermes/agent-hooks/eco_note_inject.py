@@ -54,7 +54,12 @@ HERMES_HOME = os.environ.get("HERMES_HOME", "") or os.path.expanduser(r"~\AppDat
 INJECT_COOLDOWN_SEC = 15 * 60  # 同会话冷却
 MAX_INJECT = 3                # 最多注入条数
 RECENT_ERROR_WINDOW_SEC = 10 * 60  # 最近 10 分钟内的工具错误才算「刚出错」
-HIT_NEED_TOOL_CALLS = 1       # 注入后至少 N 次 agent 工具调用才算干活
+HIT_NEED_TOOL_CALLS = 2       # R5（2026-10-04）1→2：注入后至少 N 次 agent 工具调用才算干活
+
+# R5：命中还需至少一次「与报错相关」的工具调用（工具名/参数含错误线索词）——
+# 防止"注入后随便调了个无关工具"被反证式判定记为 hit（gold 噪声源）
+ERROR_HINT_WORDS = ("error", "err", "fail", "traceback", "exception", "debug", "fix",
+                    "报错", "错误", "失败", "异常", "修复", "排查", "问题")
 
 # 注入标记（防回声）：信号扫描/上下文提取排除含此标记的消息——共享自 signals 模块
 ECHO_MARK = sig.ECHO_MARK
@@ -204,6 +209,7 @@ def poll_injection_result(session_id: str) -> dict:
     except sqlite3.Error:
         return {"verdict": "none"}
     tool_calls = 0
+    related_calls = 0  # R5：与报错相关的工具调用数
     for rid, role, content, tool_calls_json, ts in rows:
         if role == "tool":
             d = sig.parse_tool_content(content or "")
@@ -218,7 +224,13 @@ def poll_injection_result(session_id: str) -> dict:
         elif role == "assistant":
             tcs = sig.parse_tool_calls(tool_calls_json)
             tool_calls += len(tcs)
-    if tool_calls >= HIT_NEED_TOOL_CALLS:
+            for tc in tcs:
+                blob = (str(tc.get("name", "")) + " " + str(tc.get("arguments", ""))).lower()
+                if any(w in blob for w in ERROR_HINT_WORDS):
+                    related_calls += 1
+    # R5：命中双条件——工具调用数达标 且 至少一次与报错相关（循环内已排除新错误/纠正，
+    # 故到达此处 = 这些相关调用未触发新错误）
+    if tool_calls >= HIT_NEED_TOOL_CALLS and related_calls >= 1:
         # Q15 修复（2026-09-06）：.injected.jsonl 写的是 entry_ids（复数列表），
         # 原读 entry_id（单数）恒 None → touch_last_hit 成死代码、last_hit 永不回写
         eids = last.get("entry_ids") or []
@@ -279,15 +291,37 @@ def maybe_auto_verify(entry_id: str) -> bool:
         old = path.read_text(encoding="utf-8", errors="replace")
         if "\nstatus: verified" in old or old.startswith("status: verified"):
             return False
-        new = old.replace("status: draft", "status: verified", 1)
-        if new == old:
+        # R6（2026-10-04）：draft→verified 替换限定 frontmatter 块内（只认首对 --- 围栏）——
+        # 旧版全文 replace 会误改正文里引用的 "status: draft" 字样
+        lines = old.splitlines(keepends=True)
+        fence = 0
+        done = False
+        for i, ln in enumerate(lines):
+            stripped = ln.strip()
+            if fence < 2 and stripped == "---":
+                fence += 1
+                continue
+            if fence == 1 and stripped.startswith("status: draft"):
+                indent = ln[:len(ln) - len(ln.lstrip())]
+                ending = ln[len(ln.rstrip("\r\n")):] or "\n"
+                lines[i] = f"{indent}status: verified{ending}"
+                done = True
+                break
+        if not done:
             return False
+        new = "".join(lines)
         safeio.write_entry(path, new, kind="experience", backup_tag="autoverify")
         append_event(".hits.jsonl", {"ts": _now().isoformat(), "entry_id": entry_id,
                                      "verdict": "auto-verified",
                                      "reason": f"confirmed-hits>={AUTO_VERIFY_HITS}"})
         return True
-    except Exception:
+    except Exception as e:
+        # R6：失败留痕（对齐 touch_last_hit 的 R11 做法），不再静默 False
+        try:
+            _log_line({"ts": _now().isoformat(), "warn": "auto-verify-failed",
+                       "entry_id": entry_id, "error": str(e)[:120]})
+        except Exception:
+            pass
         return False
 
 

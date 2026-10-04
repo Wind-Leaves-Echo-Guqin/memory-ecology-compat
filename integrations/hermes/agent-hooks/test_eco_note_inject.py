@@ -25,6 +25,8 @@ status: verified
 last_hit: 2026-09-01
 ---
 title: xarray 缺失时需激活 venv
+symptom: ModuleNotFoundError: No module named xarray
+cause: 未激活项目 venv
 action: 激活项目 venv 或安装 xarray
 boundary: venv 内也会缺则重装
 evidence: ModuleNotFoundError 复现
@@ -105,12 +107,14 @@ class InjectTest(unittest.TestCase):
 
     def test_three_state_hit(self):
         ei.handle(self._payload())
-        # 模拟注入后 agent 干活（无新错误 + 一次工具调用）
+        # 模拟注入后 agent 干活（无新错误 + R5 契约：≥2 次调用且含报错相关调用）
         import sqlite3
         conn = sqlite3.connect(self.db)
         conn.execute(
             "INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
-            (10, "s1", "assistant", "", None, '[{"name":"terminal","arguments":"activate venv"}]', 1788393700),
+            (10, "s1", "assistant", "", None,
+             '[{"name":"terminal","arguments":"activate venv and fix the error"},'
+             '{"name":"read","arguments":"check the traceback log"}]', 1788393700),
         )
         conn.execute(
             "INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
@@ -125,6 +129,28 @@ class InjectTest(unittest.TestCase):
         txt = (self.exp / "exp-20260902-0001.md").read_text(encoding="utf-8")
         # last_hit 更新（ISO 自 now 覆盖值取日期）
         self.assertRegex(txt, r"last_hit: \d{4}-\d{2}-\d{2}")
+
+    def test_unrelated_calls_not_hit(self):
+        """R5（2026-10-04）：仅无关工具调用（不含错误线索词）→ 次数达标也不判 hit。"""
+        ei.handle(self._payload())
+        import sqlite3
+        conn = sqlite3.connect(self.db)
+        conn.execute(
+            "INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
+            (10, "s1", "assistant", "", None,
+             '[{"name":"terminal","arguments":"activate venv"},{"name":"browser","arguments":"open docs"}]', 1788393700),
+        )
+        conn.execute(
+            "INSERT INTO messages VALUES (?,?,?,?,?,?,?)",
+            (11, "s1", "tool", '{"output":"ok","exit_code":0}', "terminal", None, 1788393710),
+        )
+        conn.commit()
+        conn.close()
+        os.environ["ECO_NOTE_INJECT_NOW"] = "2026-09-03T00:02:00+00:00"
+        ei.handle(self._payload())
+        # pending 不写 hits 事件（只在 hit/miss 时记账）→ 断言无 hit 记录
+        hits = [e for e in ei.read_events(".hits.jsonl") if e.get("verdict") == "hit"]
+        self.assertEqual(hits, [], "无关调用不应判 hit")
 
     def test_three_state_miss(self):
         ei.handle(self._payload())
@@ -171,6 +197,16 @@ class InjectTest(unittest.TestCase):
         self.assertTrue(ei.maybe_auto_verify("exp-20260902-0002"))
         txt = (self.exp / "exp-20260902-0002.md").read_text(encoding="utf-8")
         self.assertIn("status: verified", txt)
+        # R6（2026-10-04）：正文里引用的 "status: draft" 字样不得被替换
+        d4 = draft.replace("evidence: ModuleNotFoundError 复现",
+                           "evidence: 文档示例 status: draft 应保持原样")
+        (self.exp / "exp-20260902-0004.md").write_text(d4, encoding="utf-8")
+        for _ in range(2):
+            ei.append_event(".hits.jsonl", {"verdict": "hit", "entry_id": "exp-20260902-0004"})
+        self.assertTrue(ei.maybe_auto_verify("exp-20260902-0004"))
+        t4 = (self.exp / "exp-20260902-0004.md").read_text(encoding="utf-8")
+        self.assertIn("status: verified", t4)                    # frontmatter 已改
+        self.assertIn("文档示例 status: draft 应保持原样", t4)      # 正文未动
         # 不足阈值不升
         (self.exp / "exp-20260902-0003.md").write_text(draft, encoding="utf-8")
         ei.append_event(".hits.jsonl", {"verdict": "hit", "entry_id": "exp-20260902-0003"})

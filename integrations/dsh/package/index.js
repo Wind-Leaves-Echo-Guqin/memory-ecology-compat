@@ -9,7 +9,7 @@
  *
  * 纪律：
  *   - fail-open：Python 侧任何失败都返回 null（不注入），绝不阻塞宿主回合
- *   - 只读消费：不写任何经验内容（仅 experiences/.dsh_inject_state.json 注入状态文件）
+ *   - 只读消费：不写任何经验内容（仅 experiences/.dsh_inject_state.<会话id>.json 按会话注入状态文件，v3）
  *   - 超时：spawn 8s 上限（SDK 宿主另有每回合贡献超时兜底）
  *   - 单源：子进程语义（解释器解析/环境裁剪/参数分隔/退出码分档）复用
  *     ./lib/common.js —— 与官方桌面版 package-cordis 同一套，防两端漂移
