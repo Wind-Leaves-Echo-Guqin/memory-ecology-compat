@@ -53,10 +53,17 @@ def verify_entry(path: Path, evidence: str | None = None, dry: bool = False) -> 
     out: list[str] = []
     replaced_status = False
     seen_hit = False
+    # has_lv 只看 frontmatter 块——正文里以 last_verified: 开头的行不该抑制插入
+    _fm_end = text.find("\n---", 3)
+    _fm_block = text[3:_fm_end] if _fm_end > 0 else text[3:]
+    has_lv = re.search(r"^last_verified:", _fm_block, re.M) is not None
     for line in text.splitlines():
         if line.startswith("status:") and not replaced_status:
             out.append("status: verified")
-            out.append(f"last_verified: {today}")
+            if not has_lv:
+                # 条目原本没有 last_verified 行才随 status 插入；
+                # 有则由下方分支原位替换——否则新旧两行并存（P0-6）
+                out.append(f"last_verified: {today}")
             replaced_status = True
         elif line.startswith("last_hit:"):
             out.append(f"last_hit: {today}")

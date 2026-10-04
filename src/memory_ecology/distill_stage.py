@@ -19,7 +19,6 @@
 """
 import argparse
 import datetime
-import difflib
 import json
 import re
 import shutil
@@ -30,8 +29,10 @@ from pathlib import Path
 from lib.config import hermes_root
 from lib.fs import atomic_write, norm, slug_of
 from lib import llm as _llm
+from lib import similarity
 from lib.gatekit import acquire_lock, release_lock, connect_db
-from lib.memstore import parse_frontmatter, dump_frontmatter, load_detail  # §C：解析/IO 单源
+from lib.memstore import (parse_frontmatter, dump_frontmatter, load_detail,
+                          parse_l1, serialize_l1)  # §C：解析/IO 单源
 
 HERMES = hermes_root()
 DETAIL_DIR = HERMES / "memories" / "detail"
@@ -43,7 +44,8 @@ LOCK_FILE = HERMES / "scripts" / ".distill_stage.lock"
 
 OBSERVE_DAYS = 30       # 观察期
 MAX_TRAIT = 80          # 特质句长度上限
-MAX_BATCH = 3           # 每轮最多蒸馏条数
+MAX_BATCH = 3           # 每轮最多蒸馏条数（阶段2）
+PROMOTE_MAX = 3         # 阶段1每轮最多晋升条数（P1：旧版无上限，可把 USER 推过配额）
 USER_QUOTA = 1500       # USER.md 字符配额
 USER_WATERMARK = 0.90   # USER 占用 >90% 暂停蒸馏
 MIN_OCC = 2             # 候选 occurrences 门槛
@@ -74,10 +76,12 @@ def llm_trait(body: str) -> str:
 
 
 def load_candidates(cand_dir: Path) -> list[dict]:
+    """读观察期候选。P1：包含 evolve approve 产出的 *.md.approved（人工已确认）——
+    旧版 glob("*.md") 看不见它们，人工决策被无痕丢弃；approved 候选排最前。"""
     items = []
     if not cand_dir.exists():
         return items
-    for f in sorted(cand_dir.glob("*.md")):
+    for f in sorted(cand_dir.glob("*.md")) + sorted(cand_dir.glob("*.md.approved")):
         if f.name.endswith((".promoted.md", ".rejected.md")):
             continue
         try:
@@ -85,16 +89,18 @@ def load_candidates(cand_dir: Path) -> list[dict]:
         except OSError:
             continue
         fm, body = parse_frontmatter(text)
-        items.append({"path": f, "name": f.stem, "fm": fm, "body": body})
+        items.append({"path": f, "name": f.stem, "fm": fm, "body": body,
+                      "approved": f.name.endswith(".approved")})
+    items.sort(key=lambda c: (not c["approved"], c["name"]))
     return items
 
 
 def user_entries(user_file: Path) -> list[str]:
-    """USER.md 按 § 分隔拆条目（整块，strip）。"""
+    """USER.md 按 § 行锚定拆条目（P0：不用字符级 split，防正文内联 § 被误拆）。"""
     if not user_file.exists():
         return []
-    text = user_file.read_text(encoding="utf-8")
-    return [e.strip() for e in text.split("§") if e.strip()]
+    entries, _ = parse_l1(user_file.read_text(encoding="utf-8"))
+    return entries
 
 
 def user_usage(user_file: Path) -> int:
@@ -114,7 +120,7 @@ def find_conflict(trait: str, entries: list[str]) -> str | None:
             continue
         if nt in ne or ne in nt:
             return e  # 包含关系 = 同义
-        ratio = difflib.SequenceMatcher(None, nt, ne).ratio()
+        ratio = similarity.ratio(nt, ne)  # 批 5：统一相似度层
         if ratio >= REPLACE_RATIO:
             return e
     return None
@@ -140,20 +146,29 @@ def _append_user_entry(user_file: Path, text: str) -> None:
         atomic_write(user_file, s + "\n")
 
 
+def _read_raw(user_file: Path) -> str:
+    """newline='' 读取——不做通用换行转换，配合 parse_l1 的换行风格探测保真往返。"""
+    with user_file.open("r", encoding="utf-8", newline="") as f:
+        return f.read()
+
+
 def _replace_user_entry(user_file: Path, old: str, new: str) -> bool:
-    """整块替换（按 § 分块精确匹配，P1-5：不做子串替换；找不到 → 返回 False 不替换）。"""
-    text = user_file.read_text(encoding="utf-8")
-    blocks = text.split("§")
-    replaced = False
-    for i, b in enumerate(blocks):
-        if b.strip() == old.strip():
-            blocks[i] = new.strip()
-            replaced = True
-            break
-    if not replaced:
-        return False  # 未找到整块（异常状态：不替换，交报告）
-    atomic_write(user_file, "§".join(blocks))
-    return True
+    """整块替换（P0-4：经 memstore.parse_l1/serialize_l1 行锚定重写）。
+
+    旧实现 `"§".join(text.split("§"))` 会丢掉被替换块两端的换行，产物形如
+    `trait A\\n§NEW§\\ntrait C`——§ 不再独占一行，门② parse_l1 把整个文件解析成
+    一条 → 超配额整体挤出 → USER.md 被清空。行锚定重写保证 § 结构往返守恒。
+    old 按整块精确匹配（strip 后比对）；找不到 → 返回 False 不替换。
+    """
+    raw = _read_raw(user_file)
+    entries, nl = parse_l1(raw)
+    target = old.strip()
+    for i, e in enumerate(entries):
+        if e == target:
+            entries[i] = new.strip()
+            atomic_write(user_file, serialize_l1(entries, nl))
+            return True
+    return False  # 未找到整块（异常状态：不替换，交报告）
 
 
 _logged_actions: list[str] = []  # v0.3：本轮已发生的动作（供零动作心跳判断）
@@ -168,6 +183,7 @@ def log_distill(conn: sqlite3.Connection, action: str, target: str, note: str, d
         "INSERT INTO distill_log(ts, action, target, note) VALUES(?,?,?,?)",
         (ts, action, target, note),
     )
+    conn.commit()  # P1：逐条落账——中途异常时账本与已落地动作一致（旧版最后才 commit）
 
 
 def main() -> int:
@@ -186,6 +202,10 @@ def main() -> int:
             return 0
     try:
         return _run(args)
+    except Exception as e:
+        # P1：顶层兜底——阶段1已落地的动作有逐条 commit 的账本可查，这里只负责可见性
+        print(f"⚠️ 蒸馏门异常终止: {e}")
+        return 1
     finally:
         if not args.dry_run:
             release_lock(LOCK_FILE)
@@ -216,14 +236,24 @@ def _run(args) -> int:
         return 0
 
     # ---- 阶段 1：观察期候选复查（created 30 天前 → 升 USER 或 rejected）----
+    promoted = 0  # P1：本轮晋升计数（上限 PROMOTE_MAX，逐条配额复查）
     for c in load_candidates(args.cand):
         created = c["fm"].get("created", "")
         try:
             age = (today - datetime.date.fromisoformat(created)).days
         except ValueError:
-            age = -1
-        if age < OBSERVE_DAYS:
-            continue  # 观察期未满
+            # P1：日期损坏不再静默永久卡在观察期——跳过并告警（人工修 fm 后下轮正常）
+            report.append(f"⚠️ SKIP   {c['name']}（created 无法解析：{created!r}，请修正候选文件）")
+            continue
+        if not c["approved"] and age < OBSERVE_DAYS:
+            continue  # 观察期未满（evolve approve 的人工确认候选豁免观察期——人工已裁决）
+        if promoted >= PROMOTE_MAX:
+            report.append(f"⏸ 本轮晋升已达上限 {PROMOTE_MAX}，{c['name']} 留待下轮")
+            continue  # 不改名——候选保持待处理
+        usage_now = user_usage(args.user)
+        if usage_now + len(c["body"]) + 3 > USER_QUOTA:
+            report.append(f"⏸ USER 配额将满（{usage_now}/{USER_QUOTA}），{c['name']} 留待下轮")
+            continue
         src = c["fm"].get("source", "")
         src_active = True
         if src:
@@ -263,8 +293,10 @@ def _run(args) -> int:
                         bak.unlink()
                     continue
                 c["path"].rename(c["path"].with_suffix(".promoted.md"))
+                promoted += 1
                 if bak:
                     report.append(f"  备份: {bak.name}")
+            promoted += 1  # dry-run 也计数：PROMOTE_MAX 上限在预览中同样生效
             report.append(f"REPLACE {conflict[:30]} → {c['body'][:40]}（同义整块替换，旧条目入 quarantine）")
             log_distill(conn, "replace", conflict, f"new={c['name']}", args.dry_run)
         else:
@@ -272,8 +304,10 @@ def _run(args) -> int:
                 bak = _backup_user(args.user)
                 _append_user_entry(args.user, c["body"])
                 c["path"].rename(c["path"].with_suffix(".promoted.md"))
+                promoted += 1
                 if bak:
                     report.append(f"  备份: {bak.name}")
+            promoted += 1  # dry-run 也计数：PROMOTE_MAX 上限在预览中同样生效
             report.append(f"PROMOTE {c['name']} → USER.md")
             log_distill(conn, "promote", c["name"], "", args.dry_run)
 
@@ -307,15 +341,24 @@ def _run(args) -> int:
         eligible.append(d)
     eligible.sort(key=lambda d: d["name"])
     for d in eligible[:MAX_BATCH]:
-        try:
-            trait = llm_trait(d["body"]) or d["body"][:MAX_TRAIT]
-        except Exception as e:
-            # P1-1：LLM 失败优雅降级（不阻断管道）
+        if args.dry_run:
+            # P1：dry-run 不发起真实 LLM 调用（旧版有网络副作用与费用，且报告与实际执行可能不一致）
             trait = d["body"][:MAX_TRAIT]
-            report.append(f"  ⚠️ LLM 措辞失败，回退原文: {e}")
+        else:
+            try:
+                trait = llm_trait(d["body"]) or d["body"][:MAX_TRAIT]
+            except Exception as e:
+                # P1-1：LLM 失败优雅降级（不阻断管道）
+                trait = d["body"][:MAX_TRAIT]
+                report.append(f"  ⚠️ LLM 措辞失败，回退原文: {e}")
         trait = trait[:MAX_TRAIT]
         slug = slug_of(trait)
         if not args.dry_run:
+            # P1：同 slug 候选已存在（不同 source 产出同一句通用措辞）→ 跳过不覆盖，
+            # 防止 created 被反复刷新、观察期永远无法完成的乒乓循环
+            if (args.cand / f"{slug}.md").exists():
+                report.append(f"SKIP    候选 {slug} 已存在（源 {d['name']}），不覆盖不重置观察期")
+                continue
             cfm = {
                 "source": d["name"], "created": today.isoformat(),
                 "status": "observing", "sessions": d["fm"].get("session_count", "?"),

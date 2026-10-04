@@ -17,7 +17,6 @@ detail/quarantine/gate_log/eco.db；幂等（fingerprint 防重 + 每动作即�
 """
 import argparse
 import datetime
-import difflib
 import hashlib
 import json
 import os
@@ -30,9 +29,10 @@ from lib.config import hermes_root
 from lib.fs import atomic_write, norm, slug_of
 from lib import safeio
 from lib import llm as _llm
-from lib.gatekit import acquire_lock as _acquire_lock, release_lock as _release_lock, connect_db
+from lib import similarity
+from lib.gatekit import acquire_lock_auto, release_lock, connect_db
 from lib.memstore import (parse_frontmatter, dump_frontmatter, parse_candidates,
-                          mark_consumed, load_detail)  # PORT_SPEC §C：口径/解析单源
+                          mark_consumed, load_detail, is_pending_active)  # PORT_SPEC §C：口径/解析单源
 
 HERMES = hermes_root()
 PENDING_DIR = HERMES / "memories" / "pending"
@@ -86,13 +86,12 @@ def rule_type(text: str) -> str:
 
 
 def find_similar(text: str, detail: list[dict], threshold: float) -> list[dict]:
-    """返回相似度 ≥ threshold 的 detail 条目（按相似度降序）。"""
-    ntext = norm(text)
-    if not ntext:
-        return []
+    """返回相似度 ≥ threshold 的 detail 条目（按相似度降序）。
+    批 5：相似度内核走 lib/similarity 统一层（默认 difflib 行为锁定；
+    MEMORY_ECOLOGY_SIM_BACKEND=ngram/embedding 可切换——切换前先跑 eco_sim_eval）。"""
     hits = []
     for d in detail:
-        ratio = difflib.SequenceMatcher(None, ntext, norm(d["body"])).ratio()
+        ratio = similarity.ratio(text, d["body"])
         if ratio >= threshold:
             hits.append({"detail": d, "ratio": ratio})
     hits.sort(key=lambda h: h["ratio"], reverse=True)
@@ -120,27 +119,31 @@ def add_entry(detail_dir: Path, text: str, fm_extra: dict) -> Path:
     }
     path = safeio.safe_entry_path(detail_dir, slug_of(text))
     if path.exists():
-        # 已存在（如 pending 重建致 fingerprint 变化）：不覆盖，走 UPDATE 语义
+        # 已存在（如 pending 重建致 fingerprint 变化）：不覆盖，走 UPDATE 语义。
+        # P1：读取/写入失败直接抛给上层记失败（候选不消费、下轮重试）——
+        # 旧版 except OSError: pass 后直接 return，账本记了从未发生的 ADD（假成功）。
+        old_fm, old_body = parse_frontmatter(path.read_text(encoding="utf-8"))
         try:
-            old_fm, old_body = parse_frontmatter(path.read_text(encoding="utf-8"))
-            try:
-                old_fm["occurrences"] = str(int(old_fm.get("occurrences", "1")) + 1)
-            except ValueError:
-                old_fm["occurrences"] = "2"
-            old_fm["last_seen"] = now
-            old_fm["last_verified"] = now
-            safeio.write_entry(path, dump_frontmatter(old_fm, old_body), kind="detail")
-        except OSError:
-            pass  # 读取失败则仍走新写（原子）
+            old_fm["occurrences"] = str(int(old_fm.get("occurrences", "1")) + 1)
+        except ValueError:
+            old_fm["occurrences"] = "2"
+        old_fm["last_seen"] = now
+        old_fm["last_verified"] = now
+        safeio.write_entry(path, dump_frontmatter(old_fm, old_body), kind="detail")
     else:
         safeio.write_entry(path, dump_frontmatter(fm, text[:MAX_BODY]), kind="detail")
     return path
 
 
 def update_entry(d: dict) -> None:
-    """近似重复：occurrences+1；跨天出现则 session_count+1；刷新 last_verified（防活跃记忆被误归档）。"""
-    fm = d["fm"]
+    """近似重复：occurrences+1；跨天出现则 session_count+1；刷新 last_verified（防活跃记忆被误归档）。
+    P1：同轮多条候选命中同一目标时，逐次从磁盘重读最新值再增补——入口快照会把
+    两次 +1 都写在同一基线上，实际只涨 1（丢失更新）。"""
     today = datetime.date.today().isoformat()
+    try:
+        fm, body = parse_frontmatter(d["path"].read_text(encoding="utf-8"))
+    except OSError:
+        fm, body = dict(d["fm"]), d["body"]
     try:
         fm["occurrences"] = str(int(fm.get("occurrences", "1")) + 1)
     except ValueError:
@@ -152,7 +155,7 @@ def update_entry(d: dict) -> None:
             fm["session_count"] = "2"
     fm["last_seen"] = today
     fm["last_verified"] = today  # P1-1：活跃记忆持续复核，不被 eco_review 误归档
-    safeio.write_entry(d["path"], dump_frontmatter(fm, d["body"]), kind="detail")
+    safeio.write_entry(d["path"], dump_frontmatter(fm, body), kind="detail")
 
 
 def supersede_entry(d: dict, new_slug: str, quarantine_dir: Path) -> Path:
@@ -203,19 +206,46 @@ def _match_target(decision: dict, sims: list) -> dict | None:
     return sims[0]["detail"] if sims else None
 
 
-def main() -> int:
+def consumable_files(by_file: dict[str, list[dict]], terminal: set[str],
+                     pending_dir: Path) -> set[str]:
+    """P0-1：可消费文件判定。
+
+    一个文件可消费 ⇔ 它解析出的**全部**候选都已终态（历史指纹已存在，或本轮成功处理）；
+    无候选的文件照旧消费（与原行为一致）。被 MAX_OUTPUT 截断或处理失败的候选
+    所在文件留在 pending，下轮续处理——不再被尾部统一改名静默吞掉。
+    """
+    out: set[str] = set()
+    for fname, cs in by_file.items():
+        if all(f"{c['file']}|{c['raw']}" in terminal for c in cs):
+            out.add(fname)
+    for p in pending_dir.glob("*.md"):
+        if is_pending_active(p.name) and p.name not in by_file:
+            out.add(p.name)
+    return out
+
+
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--pending", type=Path, default=PENDING_DIR)
     ap.add_argument("--detail", type=Path, default=DETAIL_DIR)
     ap.add_argument("--db", type=Path, default=DB)
     ap.add_argument("--logdir", type=Path, default=LOG_DIR)
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
-    if not _acquire_lock(LOCK):
+    locked, how = acquire_lock_auto(LOCK)
+    if not locked:
         print("⚠️ 已有 write_gate 实例在运行，本轮跳过")
         return 0
+    if how == "stale-cleared":
+        print("🧹 清理了失效残留锁（持有进程已不存在），本轮正常执行")
+    try:
+        return _run(args)
+    finally:
+        release_lock(LOCK)
 
+
+def _run(args) -> int:
     if not args.dry_run:
         args.detail.mkdir(parents=True, exist_ok=True)
         args.logdir.mkdir(parents=True, exist_ok=True)
@@ -227,21 +257,35 @@ def main() -> int:
         conn.execute("""CREATE TABLE IF NOT EXISTS gate_log(
             ts TEXT, fingerprint TEXT PRIMARY KEY, action TEXT, target TEXT, note TEXT)""")
 
-    cands = parse_candidates(args.pending)
-    # P1-9：先过滤已处理 fingerprint 再取前 MAX_OUTPUT（防候选饥饿）
-    cands = [c for c in cands
-             if not _fingerprint_done(conn, f"{c['file']}|{c['raw']}")][:MAX_OUTPUT]
+    cands_all = parse_candidates(args.pending)
+    # 按文件分组（P0-1 消费判定用）；候选键 = "file|raw"（与指纹口径一致）
+    by_file: dict[str, list[dict]] = {}
+    for c in cands_all:
+        by_file.setdefault(c["file"], []).append(c)
+    terminal: set[str] = set()  # 终态 = 历史指纹已存在 或 本轮成功处理
+    fresh = []
+    for c in cands_all:
+        key = f"{c['file']}|{c['raw']}"
+        if _fingerprint_done(conn, key):
+            terminal.add(key)
+        else:
+            fresh.append(c)
+    # P1-9：先过滤已处理 fingerprint 再取前 MAX_OUTPUT（防候选饥饿）；
+    # P0-1：被截断的候选其所在文件本轮不消费，留待下轮
+    cands = fresh[:MAX_OUTPUT]
     detail = load_detail(args.detail)
     today = datetime.date.today().isoformat()
     report = []
     failures = 0
 
     for c in cands:
-        fp = hashlib.md5(f"{c['file']}|{c['raw']}".encode("utf-8")).hexdigest()
+        key = f"{c['file']}|{c['raw']}"
+        fp = hashlib.md5(key.encode("utf-8")).hexdigest()
         text = c["text"]
         if not norm(text):
             report.append(f"SKIP     {text[:40]}（空/纯标点，无信息量）")
             log_gate(conn, fp, "NOOP", "", "空内容", args.dry_run)
+            terminal.add(key)
             continue
         sims = find_similar(text, detail, SIM_SUSPECT)
         decision = None
@@ -278,6 +322,11 @@ def main() -> int:
                 action = "ADD"
             decision = {"type": ctype, "action": action,
                         "target": sims[0]["detail"]["name"] if sims else "", "note": "非法action回退规则"}
+        # LLM 在线时也可能对完全同文（≥0.95）判 UPDATE——与规则兜底同口径钳制为 NOOP，
+        # 防 occurrences 被同一文本反复膨胀（P1）
+        if decision.get("action") == "UPDATE" and sims and sims[0]["ratio"] >= 0.95:
+            decision = dict(decision, action="NOOP",
+                            note=decision.get("note", "") + "（≥0.95 同文钳制为 NOOP）")
         ctype = decision.get("type", rule_type(text))
         note = decision.get("note", "")
         target = ""
@@ -308,10 +357,20 @@ def main() -> int:
                 if hit:
                     target = hit["name"]
                     if not args.dry_run:
-                        # R10（v2.2.0 review）：先失效旧条目再写新条目——supersede 失败时
-                        # 不再留下「新条目已入库 + 旧条目未失效」的半程状态（次日重试会膨胀 occurrences）
-                        supersede_entry(hit, slug_of(text), QUARANTINE_DIR)
-                        p = add_entry(args.detail, text, {"type": ctype})
+                        # R10（v2.2.0 review）：先失效旧条目再写新条目；P1 补强——
+                        # 写新失败时把旧条目从 quarantine 原位还原（fm 快照是 supersede 前的），
+                        # 候选下轮可重试，不再留下「旧条目已废 + 新条目未落盘」且随 .done 丢失的半程态
+                        qtarget = supersede_entry(hit, slug_of(text), QUARANTINE_DIR)
+                        try:
+                            p = add_entry(args.detail, text, {"type": ctype})
+                        except Exception:
+                            try:
+                                os.replace(qtarget, hit["path"])
+                                safeio.write_entry(hit["path"], dump_frontmatter(hit["fm"], hit["body"]),
+                                                   kind="detail")
+                            except Exception as e2:
+                                print(f"⚠️ 旧条目还原失败（quarantine 副本仍在，可人工恢复）: {e2}")
+                            raise
                         report.append(f"CONFLICT {text[:40]} → 新条目 {p.stem}，旧条目 {target} 已 superseded→quarantine {note}")
                         log_gate(conn, fp, "CONFLICT", target, f"new={p.stem} {note}", args.dry_run)
                     else:
@@ -330,15 +389,30 @@ def main() -> int:
             failures += 1
             report.append(f"⚠️ 处理失败 {text[:40]}: {e}")
             print(f"⚠️ {text[:40]}: {e}")
+        else:
+            terminal.add(key)  # P0-1：成功处理才终态；失败候选留待下轮重试
         if not args.dry_run:
             conn.commit()  # P1-4：每个动作后立即落库，崩溃窗口不破坏幂等
+
+    # v0.3 对齐门③④：零新候选轮次写 idle 心跳（"门在跑"有据可查）；
+    # fingerprint 按日哈希，gate_log 主键不跨日冲突
+    if not args.dry_run and not fresh:
+        log_gate(conn, hashlib.md5(f"idle|{today}".encode("utf-8")).hexdigest(),
+                 "idle", "", "heartbeat 零新候选（门在跑）")
+        conn.commit()
 
     conn.commit()
     conn.close()
 
-    # Q22（2026-09-06）：全部候选已过指纹幂等，成功跑完后统一标记已消费
+    # Q22（2026-09-06）+ P0-1（2026-10-04）：只消费「全部候选已达终态」的文件——
+    # MAX_OUTPUT 截断的、处理失败的历史上被尾部统一改名 .done.md 静默吞掉，现在留待下轮
     if not args.dry_run:
-        mark_consumed(args.pending)
+        consume = consumable_files(by_file, terminal, args.pending)
+        deferred = sorted(set(by_file) - consume)
+        if deferred:
+            print(f"⏸ {len(deferred)} 个文件存在未终态候选，留待下轮: "
+                  f"{', '.join(deferred[:5])}{'…' if len(deferred) > 5 else ''}")
+        mark_consumed(args.pending, only=consume)
 
     if args.dry_run:
         print("== DRY-RUN（未修改任何文件）==")
@@ -349,8 +423,9 @@ def main() -> int:
         print(f"✅ 整合日志 → {out}")
     for r in report:
         print(r)
-    print(f"共 {len(cands)} 条候选，处理 {len(report)} 条，失败 {failures} 条")
-    LOCK.unlink(missing_ok=True)
+    skipped = len(cands_all) - len(fresh)
+    print(f"本轮处理 {len(cands)} 条候选（另有 {skipped} 条历史指纹跳过），"
+          f"报告 {len(report)} 条，失败 {failures} 条")
     return 1 if failures else 0
 
 

@@ -41,17 +41,18 @@
 返回码：0=成功（无失败项），1=存在失败项。
 """
 from lib.fs import atomic_write
-from lib.gatekit import connect_db, write_ledger
+from lib.gatekit import acquire_lock_auto, release_lock, connect_db, write_ledger
 from lib.memstore import clean_value, parse_frontmatter_strict
+from lib import similarity
 
 import argparse
-import difflib
 import shutil
 import sys
 from datetime import datetime, date
 from pathlib import Path
 
 TODAY = date.today()
+LOCK = Path(__file__).resolve().parent / ".eco_review.lock"
 
 EXPIRY_THRESHOLDS = {
     'semantic': 90,
@@ -111,29 +112,55 @@ def expiry_threshold(mtype) -> int:
     return EXPIRY_THRESHOLDS.get((mtype or '').strip().lower(), DEFAULT_THRESHOLD)
 
 
-def rewrite_status(raw: str, new_status: str, refresh_lv: bool = False):
+def rewrite_status(raw: str, new_status: str, refresh_lv: bool = False) -> tuple[str, bool]:
     """替换 frontmatter 里的 status 行；refresh_lv=True 时同时刷新 last_verified=今天
-    （mark_dormant 用：降级后给足观察期，避免「active→dormant→archive」两天走完）。"""
+    （mark_dormant 用：降级后给足观察期，避免「active→dormant→archive」两天走完）。
+
+    P0-7 修复：键匹配口径与 memstore.parse_frontmatter_strict 对齐
+    （`key.partition(":")[0].strip()`）——旧版 startswith('status:') 匹配不到
+    `status :`（冒号前带空格），静默空写且门报成功，条目永远停在 active。
+    只认第一对 --- 围栏（旧版逐个切换 in_fm，正文里的 --- 水平线会重新进入
+    "frontmatter" 误改正文 status 行）。
+    返回 (新内容, changed)；changed=False 表示 frontmatter 未命中 status 行
+    （缺 last_verified 且 refresh_lv=True 时会在 status 行后补一行，保证观察期语义）。
+    """
     bom = ''
     if raw.startswith('\ufeff'):
         bom = '\ufeff'
         raw = raw[len(bom):]
     lines = raw.splitlines(keepends=True)
-    in_fm = False
     today = date.today().isoformat()
+    changed = False
+    status_done = False
+    lv_done = False
+    status_idx = None
+    fence = 0
     for i, ln in enumerate(lines):
         stripped = ln.rstrip('\r\n').strip()
-        if stripped == '---':
-            in_fm = not in_fm
+        if fence < 2 and stripped == '---':
+            fence += 1
             continue
-        if in_fm:
+        if fence != 1 or ':' not in stripped:
+            continue
+        key = stripped.split(':', 1)[0].strip()
+        if key == 'status' and not status_done:
             indent = ln[:len(ln) - len(ln.lstrip())]
             ending = line_ending(ln)
-            if stripped.startswith('status:'):
-                lines[i] = f"{indent}status: {new_status}{ending}"
-            elif refresh_lv and stripped.startswith('last_verified:'):
-                lines[i] = f"{indent}last_verified: {today}{ending}"
-    return bom + ''.join(lines)
+            lines[i] = f"{indent}status: {new_status}{ending}"
+            status_done = True
+            status_idx = i
+            changed = True
+        elif refresh_lv and not lv_done and key == 'last_verified':
+            indent = ln[:len(ln) - len(ln.lstrip())]
+            ending = line_ending(ln)
+            lines[i] = f"{indent}last_verified: {today}{ending}"
+            lv_done = True
+    if refresh_lv and status_done and not lv_done and status_idx is not None:
+        # 缺 last_verified 行：不补的话 dormant 条目仍视为超期，观察期形同虚设
+        sl = lines[status_idx]
+        indent = sl[:len(sl) - len(sl.lstrip())]
+        lines.insert(status_idx + 1, f"{indent}last_verified: {today}{line_ending(sl) or chr(10)}")
+    return bom + ''.join(lines), changed
 
 
 
@@ -192,11 +219,20 @@ def scan_detail(detail_dir: Path):
         days = days_since(lv)
         threshold = expiry_threshold(mtype)
         overdue = lv is None or (days is not None and days > threshold)
+        # P0.5 使用驱动休眠（2026-10-04）：窗口内有检索命中的条目免于降级/归档——
+        # 被用过的记忆不因日历超期而被排水（命中由 memory_query 回写 last_hit）
+        use_note = ""
+        hit_d = parse_date_value(fields.get('last_hit'))
+        if hit_d is not None:
+            use_age = (TODAY - hit_d).days
+            if 0 <= use_age <= threshold:
+                overdue = False
+                use_note = f"，但 {use_age} 天前被检索命中（≤{threshold} 天窗口）→ 暂缓"
         slug = fields.get('name') or p.stem
         if lv is None:
-            reason = f"last_verified 缺失/解析失败（阈值 {threshold} 天，视为超期）"
+            reason = f"last_verified 缺失/解析失败（阈值 {threshold} 天，视为超期）{use_note}"
         else:
-            reason = f"超期 {days} 天（阈值 {threshold} 天）"
+            reason = f"超期 {days} 天（阈值 {threshold} 天）{use_note}"
         rec = {
             'path': p, 'slug': slug, 'type': mtype or 'unknown',
             'status': status or 'unknown', 'last_verified': fields.get('last_verified') or '',
@@ -223,9 +259,9 @@ def apply_detail_actions(actions, archive_dir: Path, dry_run: bool) -> int:
                 if dry_run:
                     print(f"  [mark_dormant] {rec['slug']} → status 改为 dormant（{reason}）")
                     continue
-                new_content = rewrite_status(rec['raw'], 'dormant', refresh_lv=True)
-                if new_content is None:
-                    raise RuntimeError('frontmatter 中未找到 status 行')
+                new_content, changed = rewrite_status(rec['raw'], 'dormant', refresh_lv=True)
+                if not changed:
+                    raise RuntimeError('frontmatter 中未找到 status 行（未做任何修改）')
                 atomic_write(p, new_content)
                 print(f"  [mark_dormant] {rec['slug']} status→dormant（{reason}）")
             elif act == 'archive':
@@ -269,7 +305,7 @@ def find_merge_candidates(files):
                 if key in seen:
                     continue
                 seen.add(key)
-                ratio = difflib.SequenceMatcher(None, a['body'], b['body']).ratio()
+                ratio = similarity.ratio(a['body'], b['body'])  # 批 5：统一相似度层
                 if ratio >= SIMILARITY_THRESHOLD:
                     candidates.append({'a': a['slug'], 'b': b['slug'], 'ratio': ratio})
     candidates.sort(key=lambda c: (-c['ratio'], c['a'], c['b']))
@@ -300,12 +336,15 @@ def scan_quarantine(quarantine_dir: Path):
             try:
                 mtime = datetime.fromtimestamp(p.stat().st_mtime).date()
                 days = max(0, (TODAY - mtime).days)
+                src = "mtime"
             except OSError as e:
                 print(f"  ⚠️ stat 失败 {p}: {e}")
                 failures += 1
                 continue
+        else:
+            src = "目录日期"
         if days > QUARANTINE_DAYS:
-            actions.append({'path': p, 'rel': rel, 'days': days})
+            actions.append({'path': p, 'rel': rel, 'days': days, 'src': src})
     return actions, failures
 
 
@@ -313,14 +352,15 @@ def apply_quarantine_actions(actions, archive_dir: Path, dry_run: bool) -> int:
     failures = 0
     for rec in actions:
         p, rel, days = rec['path'], rec['rel'], rec['days']
+        src = rec.get('src', 'mtime')  # P2：天数来源（目录日期优先于 mtime）——账本不再一律误标 mtime
         target = unique_target(archive_dir, rel)
         if dry_run:
-            print(f"  [quarantine_cleanup] {rel}（mtime {days} 天）→ {target}")
+            print(f"  [quarantine_cleanup] {rel}（{src} {days} 天）→ {target}")
             continue
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(p), str(target))
-            print(f"  [quarantine_cleanup] {rel} → {target}（mtime {days} 天）")
+            print(f"  [quarantine_cleanup] {rel} → {target}（{src} {days} 天）")
         except Exception as e:
             print(f"  ⚠️ quarantine_cleanup 失败 {rel}: {e}")
             failures += 1
@@ -414,12 +454,27 @@ def parse_args(argv=None):
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    detail_dir, quarantine_dir, archive_dir, db_path, logdir = resolve_paths(args)
-    dry = args.dry_run
     try:
-        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')  # 与 eco_note_query 对齐：管道 GBK 容错
     except Exception:
         pass
+    # P0-3（2026-10-04）：门④与门①②③看齐加实例锁——cron 与手动执行并发时
+    # 两实例会同时 shutil.move 同一文件。锁文件与脚本同目录（本门不依赖 hermes 根）。
+    locked, how = acquire_lock_auto(LOCK)
+    if not locked:
+        print("⚠️ 已有 eco_review 实例在运行，本轮跳过")
+        return 0
+    if how == "stale-cleared":
+        print("🧹 清理了失效残留锁（持有进程已不存在），本轮正常执行")
+    try:
+        return _run(args)
+    finally:
+        release_lock(LOCK)
+
+
+def _run(args) -> int:
+    detail_dir, quarantine_dir, archive_dir, db_path, logdir = resolve_paths(args)
+    dry = args.dry_run
 
     print("=== 记忆生态复核门 ===")
     print(f"模式: {'DRY-RUN（仅打印，不写任何文件/数据库）' if dry else '实际执行'}")
@@ -465,7 +520,7 @@ def main(argv=None) -> int:
             (now_ts, 'merge_candidate', f"{c['a']}|{c['b']}", f"similarity={c['ratio']:.3f}"))
     for r in q_actions:
         log_entries.append(
-            (now_ts, 'quarantine_cleanup', str(r['rel']), f"mtime={r['days']}天"))
+            (now_ts, 'quarantine_cleanup', str(r['rel']), f"{r.get('src', 'mtime')}={r['days']}天"))
     # v0.3：零动作轮次也写 idle 心跳（"门在跑、本轮零动作"有据可查）
     if not log_entries:
         log_entries = [(now_ts, 'idle', '', 'heartbeat 零动作')]

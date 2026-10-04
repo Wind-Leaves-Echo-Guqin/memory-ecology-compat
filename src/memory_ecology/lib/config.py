@@ -67,9 +67,21 @@ def db_path() -> Path:
 
 
 def env_key(name: str) -> str:
-    """从 hermes/.env 读取密钥（DEEPSEEK_API_KEY 等）。"""
+    """从 hermes/.env 读取密钥（DEEPSEEK_API_KEY 等）。
+
+    P1（2026-10-04，吸收 eco_note.read_key 的防御口径）：
+    文件缺失 / 键行缺失 / 键值为空 三种情况分别给可操作的错误信息——
+    旧版 .env 缺失时抛 FileNotFoundError，用户看到的是路径错误而非"缺 API key"。
+    """
     env = hermes_root() / ".env"
+    if not env.is_file():
+        raise RuntimeError(
+            f"配置错误：{env} 不存在（无法读取 {name}）。"
+            f"可创建该文件（{name}=<key>）或改用环境变量 MEMORY_ECOLOGY_API_KEY")
     for line in env.read_text(encoding="utf-8", errors="replace").splitlines():
         if line.startswith(name + "="):
-            return line.split("=", 1)[1].strip().strip('"').strip("'")
-    raise RuntimeError(f"{name} not found in {env}")
+            val = line.split("=", 1)[1].strip().strip('"').strip("'")
+            if not val:
+                raise RuntimeError(f"配置错误：{name} 为空（残留空值键，请检查 {env}）")
+            return val
+    raise RuntimeError(f"配置错误：{env} 中无 {name} 行")

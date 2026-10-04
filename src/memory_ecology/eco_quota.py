@@ -62,6 +62,8 @@ from pathlib import Path
 
 from lib.config import hermes_root
 from lib.fs import atomic_write, norm, slug_of
+from lib.memstore import (parse_frontmatter, dump_frontmatter, load_detail,
+                          detail_prefixes, is_same_source)  # §C：解析/口径单源（2026-10-04 收编）
 
 HERMES = hermes_root()
 L1_DEFAULT = HERMES / "memories" / "MEMORY.md"
@@ -71,7 +73,7 @@ DB_DEFAULT = HERMES / "eco.db"
 
 # 口径单源（PORT_SPEC §4-C）：配额常量与 L1 计数移居 lib/metrics，此处仅 re-export 兼容
 from lib.metrics import (MEMORY_QUOTA, USER_QUOTA, RATIO, MEMORY_TRIGGER, USER_TRIGGER,
-                         chars_of, parse_l1)  # noqa: F401
+                         chars_of, parse_l1, serialize_l1)  # noqa: F401
 QUOTAS = {"MEMORY": MEMORY_QUOTA, "USER": USER_QUOTA}   # 文件名主干 → 配额（字符）
 DEFAULT_QUOTA = MEMORY_QUOTA              # 未知文件名默认配额
 MAX_BODY = 220                            # 提升时正文截断上限（字符）
@@ -86,76 +88,16 @@ DATE_HIST_RE = re.compile(r"(?:19\d{2}|20[0-2]\d)年|(?:19\d{2}|20(?:0\d|1\d|2[0
 
 
 
-def serialize_l1(entries, nl: str) -> str:
-    """把条目序列化回 § 分隔格式，保持文件原有换行风格，末尾补换行。"""
-    if not entries:
-        return ""
-    return (nl + "§" + nl).join(entries) + nl
-
-
-def parse_frontmatter(text: str):
-    """解析简化 YAML frontmatter（--- 块）→ (dict, 正文)。兼容 LF/CRLF/BOM。"""
-    if text.startswith("\ufeff"):
-        text = text[1:]
-    fm: dict = {}
-    body = text
-    if text.startswith("---"):
-        end = text.find("\n---", 3)
-        if end > 0:
-            block = text[3:end].strip()
-            body = text[end + 4:].strip()
-            for line in block.splitlines():
-                line = line.strip()
-                if ":" in line and not line.startswith("#"):
-                    k, v = line.split(":", 1)
-                    fm[k.strip()] = v.strip().strip('"').strip("'")
-    return fm, body
-
-
-def dump_frontmatter(fm: dict, body: str) -> str:
-    lines = ["---"]
-    for k, v in fm.items():
-        lines.append(f"{k}: {v}")
-    lines.append("---")
-    lines.append("")
-    lines.append(body)
-    return "\n".join(lines) + "\n"
 
 
 
 
-def load_detail(detail_dir: Path) -> list:
-    """读取 detail 目录全部条目 → [{path, stem, fm, body}]（只读，目录可不存在）。"""
-    items = []
-    if not detail_dir.exists():
-        return items
-    for f in sorted(detail_dir.glob("*.md")):
-        try:
-            text = f.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        fm, body = parse_frontmatter(text)
-        if not body.strip():
-            continue
-        items.append({"path": f, "stem": f.stem, "fm": fm, "body": body.strip()})
-    return items
 
-
-def detail_prefixes(items: list) -> set:
-    """全部 **active** detail 正文的规范化前缀集合（dormant/superseded 不参与同源判定）。"""
-    s = set()
-    for d in items:
-        if d["fm"].get("status", "").strip().lower() != "active":
-            continue
-        p = norm(d["body"])[:PREFIX_LEN]
-        if p:
-            s.add(p)
-    return s
 
 
 def qualified_prefixes(items: list) -> set:
-    """提升候选（高价值）detail 正文的规范化前缀集合。
-    用于防震荡：挤出时保护其 L1 同源条目（避免「提升→挤出→再提升」跨轮循环）。"""
+    """提升候选（高价值）detail 正文的规范化前缀集合（防震荡策略：保护其 L1 同源条目）。
+    注意与 memstore 口径不同：这里 = is_promo_candidate（type/occ/sess/冷却），非仅 active。"""
     s = set()
     for d in items:
         if is_promo_candidate(d):
@@ -163,12 +105,6 @@ def qualified_prefixes(items: list) -> set:
             if p:
                 s.add(p)
     return s
-
-
-def is_same_source(detail_body: str, entry_text: str) -> bool:
-    """同源判定：detail 正文规范化前 30 字符 被 L1 条目规范化文本包含。"""
-    p = norm(detail_body)[:PREFIX_LEN]
-    return bool(p) and p in norm(entry_text)
 
 
 def is_promo_candidate(d: dict) -> bool:
@@ -185,6 +121,8 @@ def is_promo_candidate(d: dict) -> bool:
         try:
             d = datetime.datetime.fromisoformat(tt).date()
         except (ValueError, TypeError):
+            # P1：日期损坏时不再静默永久卡死——保守仍不提升（防震荡优先），但必须可见可修
+            print(f"⚠️ {d.get('stem', '?')} transaction_time 无法解析（{tt!r}），冷却期判定失败，本轮保守不提升")
             return False
         if (datetime.date.today() - d).days < COOLDOWN_DAYS:
             return False
@@ -279,12 +217,17 @@ def process_file(path: Path, quota_override: int, detail_items: list, prefixes: 
     # ---- 功能1：提升（L2→L1），无同源才追加 ----
     promo_records = []
     if allow_promo:
+        seen_prefixes: set = set()  # P1：同轮去重——近重复 detail 不双双提升进 L1
         for d in detail_items:
             if not is_promo_candidate(d):
                 continue
+            pfx = norm(d["body"])[:PREFIX_LEN]
+            if pfx and pfx in seen_prefixes:
+                continue
             if any(is_same_source(d["body"], e) for e in entries):
                 continue
-            promo_records.append((d["body"][:MAX_BODY], d["stem"], d["fm"]))
+            seen_prefixes.add(pfx)
+            promo_records.append((d["body"][:MAX_BODY], d["name"], d["fm"]))
     work = [(e, False, i) for i, e in enumerate(entries)]
     work += [(b, True, None) for (b, _s, _f) in promo_records]
 
@@ -324,18 +267,23 @@ def process_file(path: Path, quota_override: int, detail_items: list, prefixes: 
 
     print(f"[{path.name}] {before_chars}/{quota} 字符（85%线={limit}）")
     actions = []
+    # P1：has_src 只认 **active** detail——旧版扫全部条目，L1 条目仅与 dormant/superseded
+    # 副本匹配时被当「L2 已存」跳写 detail，挤出后 active 副本凭空消失（违背绝不静默丢弃）
+    active_bodies = [norm(d["body"]) for d in detail_items
+                     if d["fm"].get("status", "").strip().lower() == "active"]
     for body, stem, fm in promo_records:
         t = fm.get("type", "?"); o = fm.get("occurrences", "?"); s = fm.get("session_count", "?")
         actions.append({"kind": "promote", "slug": stem, "preview": body[:40],
-                        "reason": f"提升L2→L1 type={t} occ={o} sess={s}", "text": body})
+                        "reason": f"提升L2→L1 type={t} occ={o} sess={s}", "text": body,
+                        "l1": path.name})
         print(f"  提升: {body[:40]} → L1 [type={t} occ={o} sess={s}]")
     for t, why in extrude_records:
-        # P0-1：免写判定必须「L1 条目被某 detail 完整包含」，前缀包含会静默丢尾部信息
-        has_src = any(norm(t) in norm(d["body"]) for d in detail_items)
+        # 免写判定 = L1 条目被某 **active** detail 完整包含（前缀包含会静默丢尾部信息）
+        has_src = any(norm(t) in b for b in active_bodies)
         slug = slug_of(t)
         actions.append({"kind": "extrude", "slug": slug, "preview": t[:40],
                         "reason": f"挤出-{why}" + ("" if has_src else f" → 写入detail:{slug}"),
-                        "text": t, "write_detail": not has_src})
+                        "text": t, "write_detail": not has_src, "l1": path.name})
         print(f"  挤出: {t[:40]} [{why}]" + ("" if has_src else " → 无detail同源 → 将写入detail"))
 
     final_entries = [m[0] for m in work]
@@ -348,7 +296,12 @@ def process_file(path: Path, quota_override: int, detail_items: list, prefixes: 
 
 
 def execute(actions: list, changed_files: list, detail_dir: Path, db: Path) -> None:
-    """实际执行：备份 → 挤出落盘 detail → L1 原子写回 → eco.db 日志。"""
+    """实际执行：备份 → 挤出落盘 detail → L1 原子写回 → eco.db 日志。
+
+    P1：账本逐动作落库（每步成功即 commit）——旧版全部动作执行完才一次性写日志，
+    中途任一 atomic_write 失败时已落地动作一行账都没有（账本与实际状态双向背离）。
+    任一步失败即停止后续动作并抛出（由 main 捕获报告），失败前的动作已记账。
+    """
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     # 1) 修改 L1 前先备份（备份绝不删除）
     for path, _ft in sorted(changed_files, key=lambda x: str(x[0])):
@@ -357,28 +310,36 @@ def execute(actions: list, changed_files: list, detail_dir: Path, db: Path) -> N
         print(f"  备份: {path.name} → {bak.name}")
     # 2) 挤出且 detail 无同源 → 先落盘 detail（保证信息不丢）
     detail_dir.mkdir(parents=True, exist_ok=True)
-    for a in actions:
-        if a["kind"] == "extrude" and a.get("write_detail"):
-            p = write_detail(detail_dir, a["text"], a["slug"])
-            print(f"  写入detail: {p.name} ← {a['preview']}")
-    # 3) L1 原子写回（先全部计算好，一次性写回）
-    for path, final_text in changed_files:
-        atomic_write(path, final_text)
-        print(f"  写回: {path.name}")
-    # 4) 日志
     conn = sqlite3.connect(str(db), timeout=10)
+    n = 0
     try:
         conn.execute("CREATE TABLE IF NOT EXISTS quota_log("
                      "ts TEXT, action TEXT, slug TEXT, l1_preview TEXT, reason TEXT)")
         now = datetime.datetime.now().isoformat(timespec="seconds")
-        n = 0
+
+        def log(action: str, slug: str, preview: str, reason: str) -> None:
+            nonlocal n
+            conn.execute(
+                "INSERT INTO quota_log(ts, action, slug, l1_preview, reason) VALUES(?,?,?,?,?)",
+                (now, action, slug, preview, reason))
+            conn.commit()
+            n += 1
+
         for a in actions:
-            if a["kind"] in ("promote", "extrude"):
-                conn.execute(
-                    "INSERT INTO quota_log(ts, action, slug, l1_preview, reason) VALUES(?,?,?,?,?)",
-                    (now, a["kind"], a["slug"], a["preview"], a["reason"]))
-                n += 1
-        conn.commit()
+            if a["kind"] == "extrude" and a.get("write_detail"):
+                p = write_detail(detail_dir, a["text"], a["slug"])
+                print(f"  写入detail: {p.name} ← {a['preview']}")
+                log("extrude", a["slug"], a["preview"], a["reason"] + "（detail已落盘）")
+        # 3) L1 原子写回（逐文件写、逐文件记账——失败时账本停在最后成功处）
+        for path, final_text in changed_files:
+            atomic_write(path, final_text)
+            print(f"  写回: {path.name}")
+            for a in actions:
+                if a.get("l1") == path.name:
+                    log(a["kind"], a["slug"], a["preview"], a["reason"])
+    except Exception:
+        conn.commit()  # 异常路径：把已成功落地的动作先记账再抛出
+        raise
     finally:
         conn.close()
     print(f"  日志: {n} 行 → {db}")
@@ -436,6 +397,22 @@ def _run_inner(args) -> int:
     n_d = sum(1 for a in all_actions if a["kind"] == "extrude" and a.get("write_detail"))
     if not all_actions:
         print("ℹ️ 无提升/挤出动作")
+        # v0.3 对齐门③④：零动作轮次写 idle 心跳（"门在跑"有据可查）
+        if not args.dry_run:
+            try:
+                conn = sqlite3.connect(str(args.db), timeout=10)
+                try:
+                    conn.execute("CREATE TABLE IF NOT EXISTS quota_log("
+                                 "ts TEXT, action TEXT, slug TEXT, l1_preview TEXT, reason TEXT)")
+                    conn.execute(
+                        "INSERT INTO quota_log(ts, action, slug, l1_preview, reason) VALUES(?,?,?,?,?)",
+                        (datetime.datetime.now().isoformat(timespec="seconds"),
+                         "idle", "", "", "heartbeat 零动作（门在跑）"))
+                    conn.commit()
+                finally:
+                    conn.close()
+            except Exception as e:
+                print(f"⚠️ idle 心跳写入失败: {e}")
     else:
         print(f"汇总: 提升 {n_p} 条 / 挤出 {n_e} 条（其中 {n_d} 条落盘 detail）/ 涉及 {len(changed_files)} 个 L1 文件")
         if not args.dry_run:

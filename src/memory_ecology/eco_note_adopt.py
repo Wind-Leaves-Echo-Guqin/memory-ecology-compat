@@ -136,11 +136,14 @@ def main() -> int:
     # 2026-09-27 修复（实战发现）：原实现只处理 PENDING_DIR/<今天>.md——
     # 历史积压（本次实测 09-04 起 22 批）永远不会被接纳，管道看似"在跑"实则只吞当天。
     # 改为：处理全部未接纳的 pending 文件（按文件名序=日期序），每文件各自日期生成 id。
+    # P1：包含 evolve approve 产出的 *.md.approved（人工已确认）——旧版 glob 看不见它们
     all_pending = sorted(
-        p for p in PENDING_DIR.glob("*.md")
-        if p.name not in ("README.md", ".watermark")
-        and not p.name.endswith((".done.md", ".rejected.md", ".accepted.md"))
-        and p.name != ".watermark.md"
+        [p for p in PENDING_DIR.glob("*.md")
+         if p.name not in ("README.md", ".watermark")
+         and not p.name.endswith((".done.md", ".rejected.md", ".accepted.md"))
+         and p.name != ".watermark.md"]
+        + sorted(PENDING_DIR.glob("*.md.approved")),
+        key=lambda p: p.name,
     )
     if not all_pending:
         print("ℹ️ 无候选文件，无需接纳")
@@ -160,22 +163,36 @@ def main() -> int:
             continue
         if len(all_pending) > 1:
             print(f"── {pending.name}（{len(fresh)} 条未接纳）──")
+        seen_triggers: set[str] = set()  # P1：同文件重复 trigger 只接纳一次（防双条目 + 标记错位）
         for c in fresh:
-            eid = make_id(existing, file_date, c.get("trigger", ""))
+            trig = c.get("trigger", "")
+            if trig and trig in seen_triggers:
+                print(f"  ⚠️ 跳过同文件重复 trigger: {trig[:40]}")
+                continue
+            if trig:
+                seen_triggers.add(trig)
+            eid = make_id(existing, file_date, trig)
             existing.add(eid)
             content = build_entry(c, eid)
             if dry:
-                print(f"  -- 将接纳 [{c.get('type')}] {c.get('trigger', '')[:40]} → {eid}.md")
+                print(f"  -- 将接纳 [{c.get('type')}] {trig[:40]} → {eid}.md")
                 continue
+            # P1：拆开「写条目」与「打标记」的异常处理——旧版合并捕获，
+            # 写成功后标记失败会被误报为「拒纳」，下轮重跑必然产出重复条目
             try:
-                # v2.2.0（R1）：per-candidate 异常隔离——单条坏候选不再毒死整条接纳管道
                 safeio.write_entry(safeio.safe_entry_path(EXP_DIR, eid), content, kind="experience")
-                mark_accepted(pending, c.get("trigger", ""))
-                accepted += 1
-                print(f"  ✅ 接纳 [{eid}] {c.get('type')} {c.get('trigger', '')[:40]}")
             except (ValueError, OSError) as e:
                 rejected += 1
-                print(f"  ⚠️ 拒纳 [{eid}] {c.get('trigger', '')[:40]}: {e}")
+                print(f"  ⚠️ 拒纳 [{eid}] {trig[:40]}: {e}")
+                continue
+            try:
+                mark_accepted(pending, trig)
+            except (ValueError, OSError) as e:
+                print(f"  ⚠️ [{eid}] 条目已写入，但 pending 标记失败: {e}")
+                print(f"     （该文件下轮可能重复接纳同 trigger，请人工补标 {pending.name}）")
+                continue
+            accepted += 1
+            print(f"  ✅ 接纳 [{eid}] {c.get('type')} {trig[:40]}")
     if not dry:
         extra = f"，拒纳 {rejected} 条" if rejected else ""
         print(f"🏁 接纳完成：{accepted} 条{extra}（源 pending 已标记保留）")

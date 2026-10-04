@@ -111,7 +111,9 @@ def main() -> int:
 
     # ---- IE：提取→整合管道健康（近 7 天，含失败数检查）----
     gate_files = list(args.logdir.glob("gate-*.md")) if args.logdir.exists() else []
-    recent = [f for f in gate_files if (datetime.date.today() - _date_of(f.name)).days <= 7] if gate_files else []
+    # P2：无日期文件名不再 _date_of 兜底 today（会虚增近期样本）——直接过滤掉
+    recent = [f for f in gate_files
+              if (d := _date_of(f.name)) and (datetime.date.today() - d).days <= 7] if gate_files else []
     ie_fails = 0
     for f in recent:
         try:
@@ -145,21 +147,23 @@ def main() -> int:
     scores["MR"] = ("PASS" if mr_ok else "FAIL", f"{len(hits)}/{len(topics)} 主题命中")
     report.append(f"MR 多会话推理: {'✅' if mr_ok else '❌'} 主题命中 {len(hits)}/{len(topics)}（需 ≥60%）")
 
-    # ---- KU：知识更新机制 ----
+    # ---- KU：知识更新机制（P2：加 30 天窗口——历史某次 CONFLICT 不代表机制现在在工作）----
     ku_conflicts = 0
+    ku_cutoff = (datetime.date.today() - datetime.timedelta(days=30)).isoformat()
     try:
         conn = sqlite3.connect(args.db, timeout=10)
         try:
             ku_conflicts = conn.execute(
-                "SELECT COUNT(*) FROM gate_log WHERE action IN ('CONFLICT','UPDATE')").fetchone()[0]
+                "SELECT COUNT(*) FROM gate_log WHERE action IN ('CONFLICT','UPDATE') "
+                "AND ts >= ?", (ku_cutoff,)).fetchone()[0]
         except sqlite3.OperationalError:
             ku_conflicts = 0
         conn.close()
     except Exception:
         ku_conflicts = 0
     ku_ok = ku_conflicts >= 1
-    scores["KU"] = ("PASS" if ku_ok else "FAIL", f"gate_log 冲突/更新 {ku_conflicts} 次")
-    report.append(f"KU 知识更新: {'✅' if ku_ok else '❌'} 冲突/更新动作 {ku_conflicts} 次（机制已运转则 PASS）")
+    scores["KU"] = ("PASS" if ku_ok else "FAIL", f"近30天 gate_log 冲突/更新 {ku_conflicts} 次")
+    report.append(f"KU 知识更新: {'✅' if ku_ok else '❌'} 近30天冲突/更新动作 {ku_conflicts} 次（机制在运转则 PASS）")
 
     # ---- TR：事件钟字段覆盖率 ----
     detail_items = []
@@ -284,14 +288,15 @@ def main() -> int:
     return 1 if fails else 0
 
 
-def _date_of(name: str) -> datetime.date:
+def _date_of(name: str) -> datetime.date | None:
+    """从文件名提取日期；失败返回 None（调用方过滤，不兜底 today 虚增近期样本）。"""
     m = re.search(r"(\d{4}-\d{2}-\d{2})", name)
     if m:
         try:
             return datetime.date.fromisoformat(m.group(1))
         except ValueError:
             pass
-    return datetime.date.today()
+    return None
 
 
 def _read_jsonl(p: Path) -> list:
