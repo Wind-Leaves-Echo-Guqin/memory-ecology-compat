@@ -56,7 +56,9 @@ class SchemaTest(unittest.TestCase):
         self.assertEqual(len(errs), 2)
 
     def test_experience_enum(self):
-        self.assertEqual(safeio.validate_experience_fm({"type": "error", "status": "verified"}), [])
+        # R9：error 型必填 symptom/cause（写在正文）——空 body 视为缺字段，故此处显式给全
+        self.assertEqual(safeio.validate_experience_fm(
+            {"type": "error", "status": "verified"}, "symptom: s\ncause: c"), [])
         errs = safeio.validate_experience_fm({"type": "semantic", "status": "active"})
         self.assertEqual(len(errs), 2)
 
@@ -78,7 +80,7 @@ class WriteEntryTest(unittest.TestCase):
 
     def test_write_ok_with_backup(self):
         p = self.root / "exp-y.md"
-        good = "---\nid: exp-y\ntype: error\nstatus: draft\n---\n正文"
+        good = "---\nid: exp-y\ntype: error\nstatus: draft\n---\ntitle: t\nsymptom: s\ncause: c"
         p.write_text(good, encoding="utf-8")
         new = good.replace("status: draft", "status: verified")
         safeio.write_entry(p, new, kind="experience", backup_tag="test")

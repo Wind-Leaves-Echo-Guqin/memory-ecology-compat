@@ -72,10 +72,17 @@ def validate_detail_fm(fm: dict) -> list:
     return errs
 
 
-def validate_experience_fm(fm: dict) -> list:
+def validate_experience_fm(fm: dict, body: str = "") -> list:
+    """经验条目 schema 校验。body 可选传入——R9（2026-10-04）：error 型必填 symptom/cause，
+    而生产约定这些字段写在**正文**（title:/symptom:/cause: 行）而非 frontmatter
+    （实测 191/191 条如此），故两处都认。"""
     errs: list = []
     _check_enums(fm, EXPERIENCE_TYPES, EXPERIENCE_STATUS, errs)
     _check_dates_counts(fm, errs)
+    if fm.get("type") == "error":
+        for k in ("symptom", "cause"):
+            if not str(fm.get(k) or "").strip() and not re.search(rf"^{k}\s*:\s*\S", body or "", re.M):
+                errs.append(f"error 型缺必填字段: {k}")
     return errs
 
 
@@ -101,8 +108,8 @@ def write_entry(path, text: str, *, kind: str | None = None, backup_tag: str | N
     from pathlib import Path
     path = Path(path)
     if kind:
-        fm, _ = parse_frontmatter(text)
-        errs = validate_detail_fm(fm) if kind == "detail" else validate_experience_fm(fm)
+        fm, body = parse_frontmatter(text)
+        errs = validate_detail_fm(fm) if kind == "detail" else validate_experience_fm(fm, body)
         if errs:
             raise ValueError(f"{path.name} schema 校验失败: {'; '.join(errs)}")
     if backup_tag:

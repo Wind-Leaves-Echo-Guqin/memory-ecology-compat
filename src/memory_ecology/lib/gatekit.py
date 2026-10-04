@@ -34,6 +34,73 @@ def release_lock(lock_path: Path) -> None:
     lock_path.unlink(missing_ok=True)
 
 
+def _pid_alive(pid: int) -> bool:
+    """进程存活探测（零依赖）：Windows 走 OpenProcess 句柄探测，
+    POSIX 走 os.kill(pid, 0)。探测失败按存活处理（宁可误判活也不误删锁）。"""
+    if pid <= 0 or pid >= 2**31:
+        # 范围防御（上收自 eco_note_backfill_runall）：超合理范围视为死（stale 锁可回收；
+        # 锁文件被写坏的情形），R7 单源收编 2026-10-04
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            ERROR_ACCESS_DENIED = 5
+            k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not h:
+                # 拒绝访问 ≠ 不存在：进程在但无查询权限，按存活处理
+                return k32.GetLastError() == ERROR_ACCESS_DENIED
+            k32.CloseHandle(h)
+            return True
+        except Exception:
+            return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
+def pid_alive(pid: int) -> bool:
+    """公开别名（跨模块使用走这里；_pid_alive 为历史名）。"""
+    return _pid_alive(pid)
+
+
+def read_lock_pid(lock_path: Path) -> int | None:
+    """读锁文件里记录的 pid；缺失/空/非数字（损坏）统一返回 None——调用方保守持有。"""
+    try:
+        s = lock_path.read_text(encoding="utf-8", errors="replace").strip()
+        return int(s) if s.isdigit() else None
+    except OSError:
+        return None
+
+
+def acquire_lock_auto(lock_path: Path) -> tuple[bool, str]:
+    """抢锁；发现死进程残留锁（pid 不存活或 pid=本进程）自动清理后重抢一次。
+
+    返回 (是否成功, "fresh"|"stale-cleared"|"held")。
+    pid 无法读取（空/损坏锁文件）时保守视为持有中——不误删可能活着的锁。
+    """
+    if acquire_lock(lock_path):
+        return True, "fresh"
+    pid = read_lock_pid(lock_path)
+    if pid is None or (pid != os.getpid() and _pid_alive(pid)):
+        return False, "held"
+    # 死锁残留（或本进程残留）：清理重抢
+    try:
+        lock_path.unlink()
+    except OSError:
+        return False, "held"
+    if acquire_lock(lock_path):
+        return True, "stale-cleared"
+    return False, "held"
+
+
 class LockContext:
     """with LockContext(path) as locked: — locked=True 表示成功获取锁。"""
     def __init__(self, lock_path: Path):
@@ -41,7 +108,7 @@ class LockContext:
         self.locked = False
 
     def __enter__(self):
-        self.locked = acquire_lock(self._path)
+        self.locked, self.how = acquire_lock_auto(self._path)
         return self.locked
 
     def __exit__(self, *exc):
@@ -75,9 +142,8 @@ def write_ledger(
         return 0
     cols = ", ".join(columns)
     ph = ", ".join("?" * len(columns))
-    conn.execute(
-        f"CREATE TABLE IF NOT EXISTS {table} ({cols})" if not _table_exists(conn, table) else ""
-    )
+    if not _table_exists(conn, table):
+        conn.execute(f"CREATE TABLE IF NOT EXISTS {table} ({cols})")
     conn.executemany(f"INSERT OR REPLACE INTO {table} VALUES ({ph})", entries)
     return len(entries)
 

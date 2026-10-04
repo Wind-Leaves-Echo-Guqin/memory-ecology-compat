@@ -52,6 +52,7 @@ LEGAL_MATRIX = {
     ("dormant", "archived"): True,
     ("frozen", "retained"): True,
     ("frozen", "archived"): True,
+    ("candidate", "retained"): True,  # 2026-10-04 拍板：与 eco_state.VALID 对齐（breed 产物为合法持久态）
 }
 REQUIRED_FIELDS = ["name", "description", "version", "status", "fate", "domain", "environment"]
 CONDITIONAL_FIELDS = {
@@ -108,6 +109,10 @@ def scan_skills():
         if err:
             bad.append((str(rel), err))
             continue
+        try:
+            st = p.stat()
+        except OSError:
+            continue  # P2：文件在 rglob 与 stat 之间被删/移动 → 跳过而非整份报告崩溃
         hermes_meta = meta.get("metadata", {}).get("hermes", {}) if isinstance(meta.get("metadata"), dict) else {}
         skills.append({
             "path": str(rel),
@@ -126,8 +131,8 @@ def scan_skills():
             "has_related_key": "related_skills" in hermes_meta,
             "tags": _as_list(hermes_meta.get("tags")),
             "has_tolerance": "tolerance" in meta,
-            "file_size": p.stat().st_size,
-            "mtime": p.stat().st_mtime,
+            "file_size": st.st_size,
+            "mtime": st.st_mtime,
         })
     return skills, bad
 
@@ -404,7 +409,7 @@ def health_score(skills, dups, dangling, ver_rate, missing, cron_errs, mem_over,
     items = []  # (扣分, 原因)
     if dups:
         items.append((15, f"重复副本 {len(dups)} 组"))
-    if ver_rate < 0.9:
+    if skills and ver_rate < 0.9:  # P2：空库 0/0 不再触发假扣分
         items.append((10, f"版本覆盖率 {ver_rate * 100:.0f}% <90%"))
     field_miss = sum(missing.values()) if missing else 0
     if field_miss > 0:
@@ -500,8 +505,12 @@ def build_report():
             prev_score = h
             break
     if prev_score:
-        delta = score - prev_score["score"]
-        L.append(f"- 上次评分: {prev_score.get('score')}（{prev_score.get('time', '?')}）→ 本次 {score}（Δ{delta:+d}）")
+        try:
+            delta = int(score) - int(prev_score["score"])
+            L.append(f"- 上次评分: {prev_score.get('score')}（{prev_score.get('time', '?')}）→ 本次 {score}（Δ{delta:+d}）")
+        except (TypeError, ValueError):
+            # P2：历史评分损坏/非整数 → 跳过对比，报告照常产出
+            L.append(f"- 上次评分: {prev_score.get('score')}（{prev_score.get('time', '?')}）→ 本次 {score}（历史评分格式异常，跳过对比）")
     else:
         L.append("- 上次评分: 无（首测基线，此后同模型内可对比趋势）")
     L.append(f"- 分项: {score_detail}")
@@ -708,6 +717,8 @@ def build_report():
             if lr:
                 try:
                     lr_dt = datetime.datetime.fromisoformat(str(lr))
+                    if lr_dt.tzinfo is None:
+                        lr_dt = lr_dt.astimezone()  # P2：naive 本地时间转 aware，修复混减 TypeError 静默失效
                     if (now - lr_dt).total_seconds() > 7 * 86400:
                         stale = " ⚠️>7天未运行"
                 except Exception:
@@ -729,8 +740,8 @@ def build_report():
         if len(dangling) - in_opt_count:
             L.append(f"| P0 | 悬空引用排查（{len(dangling) - in_opt_count} 个无落点） | 修复引用或新建技能 | 引用图无红标 |")
     field_parts = "、".join(f"{f} {c}" for f, c in missing.items()) if missing else "无"
-    batch_n = math.ceil(len(skills) / 4)
-    tail_n = len(skills) - 3 * batch_n
+    batch_n = math.ceil(len(skills) / 4) if skills else 0
+    tail_n = max(len(skills) - 3 * batch_n, 0)  # P2：小库越界（n=5 时旧式计算得 -1）
     L.append("| P1 | 补齐 frontmatter（缺: " + field_parts + f"） | 按 4 批执行（每批 {batch_n} 个，尾批 {tail_n}，共 {len(skills)} 技能），每批 git 快照（试点区：副本保留区，不干扰 P0 删除路径） | 重跑 §1/§2/§3 指标改善 |")
     L.append("| P1 | 圈定 protected.md 核心区 | 备份清单 + 核心技能清单入档 | md/json 一致性校验 |")
     L.append("| P1 | cron 报错处置（error 任务下次运行自动复核；需 gateway 运行中） | 自动复核 last_status 转 ok；持续 error 则人工排查（含脚本路径解析核查） | 报告 §8 无 error |")

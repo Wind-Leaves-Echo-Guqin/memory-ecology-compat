@@ -50,7 +50,7 @@ def _parse_entry(path: Path) -> dict | None:
 # 两级缓存：
 #   _FILE_CACHE   单文件解析结果，键 = (st_mtime_ns, st_size)（任何写入都会改 mtime）
 #   _LIB_SNAPSHOT 整库快照（条目 + 预算好的归一化 haystack），TTL 内不重复 stat/解析
-# TTL 只影响长驻进程感知新条目的延迟；CLI（每次调用新进程）恒为首次构建，语义不变。
+# TTL 只影响长驻进程感知新条目的延迟；CLI 进程内首次调用后，同进程后续 search() 命中快照（error_query.rank() 逐关键词调用即受益）。
 _FILE_CACHE: dict[str, tuple[int, int, dict | None]] = {}
 _LIB_SNAPSHOT: tuple[tuple, float, list[tuple[Path, dict, str, str]]] | None = None
 LIB_SNAPSHOT_TTL_S = 5.0
@@ -85,7 +85,7 @@ def _library() -> list[tuple[Path, dict, str, str]]:
 
     键含 EXP_DIR 身份（调用方会改 eq.EXP_DIR 指向别的数据根）与目录 mtime；
     TTL 到期后重建，重建时逐文件校验 (mtime,size) —— 长驻进程最多 5s 感知到
-    已有条目的原地修改；CLI（每次调用新进程）恒为首次构建，语义与无缓存一致。
+    已有条目的原地修改；CLI 进程内首次调用后，同进程后续 search() 命中快照（error_query.rank() 逐关键词调用即受益）。
     """
     global _LIB_SNAPSHOT
     now = time.monotonic()

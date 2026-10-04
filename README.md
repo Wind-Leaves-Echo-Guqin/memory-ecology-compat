@@ -1,12 +1,32 @@
 # Memory Ecology Compat · 记忆生态·兼容版
 
+> **Status: 🚧 Work in Progress**（2026-10-04 全量审计后进入收敛期）
+> 当前可用：四道门生命周期治理、经验笔记本全链路、memory_query 检索、多宿主适配。
+> 已知问题与架构待办：见 [ARCHITECTURE_TODO.md](ARCHITECTURE_TODO.md)。检索为字符级子串+词面打分，
+> 非语义检索——召回依赖关键词选择；语义层（本地 embedding）为可选后端，见 `lib/similarity.py`。
+
 多宿主（multi-host）的 agent 记忆与经验生态。源自 [memory-ecology](https://github.com/Wind-Leaves-Echo-Guqin/memory-ecology)（Hermes 版），
 本仓库把**可移植核心**与**宿主适配层**分离，让 Hermes 之外的 agent（当前：dsh；规划：任意 CLI/MCP 宿主）
 复用同一套记忆生命周期治理与经验笔记本。
 
 > 派生声明：本项目为原 memory-ecology（Hermes 单宿主版）的兼容衍生线，独立仓库、独立演进；
-> 自 v2.1.2 起**两线核心功能完全一致、版本号同步**（当前 v2.2.4），本线只多出「多宿主化 +
-> 观测舱 GUI」这一集成层（核心脚本零改动）。
+> 自 v2.1.2 起**版本号同步**（当前 v2.2.5）；compat = 治理核心（四道门）＋检索消费端，
+> 捕获链（信号/提取/回填）为宿主树专属，移植路线见 ARCHITECTURE_TODO.md 第四节；
+> 本线只多出「多宿主化 + 观测舱 GUI」这一集成层。
+
+## 系统构成：两条纪律线
+
+本系统由两条设计哲学不同的线构成（此前 README 统称"四道门+经验笔记本"，易误读为同质系统）：
+
+| | 自动治理线（四道门） | 半自动沉淀线（经验笔记本） |
+|---|---|---|
+| 目标 | 自动化运转（提升/挤出/蒸馏/复核） | 低置信度标记 + 人工兜底 |
+| 追求 | 可逆、幂等、稳态（防震荡） | 可观测、可追溯、零误伤 |
+| 边界 | 只出合并/复活**候选**，不自动裁决 | signals/merge/gold 均只标记不判定 |
+
+**定位澄清**：`eco_health_check.py` 检查的是 skills/ 生态（frontmatter 合法性、引用图、cron 健康），
+**不是**四道门的运行状态仪表盘；门级运行状态看各自 gate_log/distill_log/review_log 与 idle 心跳。
+`memory_query.py` 是记忆（detail+archive）的检索入口。
 
 ## English TL;DR
 

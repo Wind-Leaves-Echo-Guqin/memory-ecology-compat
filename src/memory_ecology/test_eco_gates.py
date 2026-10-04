@@ -68,7 +68,8 @@ class TestWriteGate(GateTestBase):
 
     def test_rule_type_deterministic(self):
         # 规则兜底：LLM 不可用时类型初判——只断言不崩且返回合法类型
-        self.assertIn(wg.rule_type("用户喜欢简洁的界面风格"), ("behavior", "semantic", "preference"))
+        # （旧断言含 behavior/preference——rule_type 的返回域里根本没有这两个值，断言形同虚设）
+        self.assertEqual(wg.rule_type("用户喜欢简洁的界面风格"), "semantic")
 
 
 class TestQuota(GateTestBase):
@@ -128,12 +129,13 @@ class TestReview(GateTestBase):
 
     def test_rewrite_status_and_refresh(self):
         raw = "---\nstatus: dormant\nlast_verified: 2026-08-01\n---\n正文"
-        out = er.rewrite_status(raw, "archived", refresh_lv=True)
+        out, changed = er.rewrite_status(raw, "archived", refresh_lv=True)
+        self.assertTrue(changed)
         self.assertIn("status: archived", out)
         # Q29 修复（2026-09-06）：原写死 2026-09-05，日期一变整套件恒红（日期炸弹）
         self.assertIn(f"last_verified: {datetime.date.today().isoformat()}", out)  # 刷新为今天（替换已有行）
         # refresh_lv=False 时不碰 last_verified
-        out2 = er.rewrite_status(raw, "archived")
+        out2, _ = er.rewrite_status(raw, "archived")
         self.assertIn("last_verified: 2026-08-01", out2)
 
     def test_mark_consumed_done(self):
