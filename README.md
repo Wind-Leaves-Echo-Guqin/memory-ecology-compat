@@ -1,13 +1,18 @@
 # Memory Ecology Compat · 记忆生态·兼容版
 
-> **Status: 🚧 Work in Progress**（2026-10-04 全量审计后进入收敛期）
-> 当前可用：四道门生命周期治理、经验笔记本全链路、memory_query 检索、多宿主适配。
-> 已知问题与架构待办：见 [ARCHITECTURE_TODO.md](ARCHITECTURE_TODO.md)。检索为字符级子串+词面打分，
-> 非语义检索——召回依赖关键词选择；语义层（本地 embedding）为可选后端，见 `lib/similarity.py`。
-
 多宿主（multi-host）的 agent 记忆与经验生态。源自 [memory-ecology](https://github.com/Wind-Leaves-Echo-Guqin/memory-ecology)（Hermes 版），
 本仓库把**可移植核心**与**宿主适配层**分离，让 Hermes 之外的 agent（当前：dsh；规划：任意 CLI/MCP 宿主）
 复用同一套记忆生命周期治理与经验笔记本。
+
+> ⚠️ **当前边界（先读这段再用）**
+> 1. **检索是词面级的，不是语义检索**：默认后端 difflib（字符级子串 + 词面打分），召回依赖关键词选择。
+>    本地 embedding（`bge-small-zh-v1.5` + CLS pooling，golden 182 对 AUC 0.93 vs difflib 0.90）为
+>    **可选后端，尚未默认启用**——选型依据与启用方式见 [models/README.md](models/README.md)、
+>    `lib/similarity.py` 与 ARCHITECTURE_TODO §三。
+> 2. **经验笔记本是半自动线**：signals/merge/gold 只标记不判定，成熟/合并需人工兜底，
+>    详见「系统构成：两条纪律线」。
+> 3. **Status: 🚧 Work in Progress**（2026-10-04 全量审计后进入收敛期）；
+>    已知问题与架构待办见 [ARCHITECTURE_TODO.md](ARCHITECTURE_TODO.md)。
 
 > 派生声明：本项目为原 memory-ecology（Hermes 单宿主版）的兼容衍生线，独立仓库、独立演进；
 > 自 v2.1.2 起**版本号同步**（当前 v2.2.5）；compat = 治理核心（四道门）＋检索消费端，
@@ -33,11 +38,15 @@
 Memory Ecology Compat is the **multi-host derivative** of
 [memory-ecology](https://github.com/Wind-Leaves-Echo-Guqin/memory-ecology) — an agent memory/experience
 lifecycle governance toolkit that treats memories as an ecosystem: bounded, alive, and always reversible
-(four lifecycle gates + an experience notebook + quality gate evaluation, rule-driven, zero user maintenance,
-physical deletion disabled at code level). The portable core (`src/memory_ecology`) has **zero host
+(four lifecycle gates + an experience notebook + quality gate evaluation, rule-first — LLM participates
+only in gate-① similar/conflict adjudication and gate-③ wording, physical deletion disabled at code
+level). The portable core (`src/memory_ecology`) has **zero host
 dependencies**; host adapters live in `integrations/` (Hermes reference implementation, dsh adapters
 for both the EAC Extension SDK and the official cordis-based desktop). Since v2.1.2 the two lines are
-feature-identical and version-aligned — this repo only adds the multi-host layer. MIT licensed.
+feature-identical and version-aligned — this repo only adds the multi-host layer.
+**Honest boundary:** retrieval is lexical by default (difflib substring/word-overlap scoring — local
+semantic embedding is an optional, not-yet-default backend), and the experience notebook only *flags*:
+maturation and merging keep a human in the loop. MIT licensed.
 
 ## 兼容性说明（本仓库兼容了什么）
 
@@ -57,13 +66,49 @@ feature-identical and version-aligned — this repo only adds the multi-host lay
 ## 它解决什么问题
 
 agent 的记忆通常"只进不出、写入靠自觉、超限不可见"。本生态用**四道门**治理记忆生命周期，
-用**经验笔记本**沉淀"做事经验"（错误/成功/已验证链路），全部规则驱动、可回滚、零用户维护：
+用**经验笔记本**沉淀"做事经验"（错误/成功/已验证链路）——规则驱动为主、可回滚：
+四道门自动运转零维护，LLM 仅参与门①相似/矛盾终审与门③措辞，其余环节零 LLM、离线可用：
 
-- 门① 写入整合（`write_gate.py`）：类型分型 + 相似合并 + 矛盾失效（superseded 进隔离区，永不物理删除）
+- 门① 写入整合（`write_gate.py`）：类型分型 + 相似合并 + 矛盾失效（superseded 进隔离区，永不物理删除；相似/矛盾判定 LLM 终审，规则兜底）
 - 门② 巩固/配额（`eco_quota.py`）：L1 常驻层挤出/提升，配额恒有界（纯规则，零 LLM）
 - 门③ 蒸馏（`distill_stage.py`）：L2 稳定事实 → 用户画像（规则判稳，LLM 只措辞）
 - 门④ 复核（`eco_review.py`）：遗忘曲线，超期复核 → dormant → archive（可逆）
-- 经验笔记本（`eco_note_*`）：信号捕获 → 候选区 → 按需检索（不常驻注入）→ 成熟蒸馏为技能
+- 经验笔记本（`eco_note_*`）：信号捕获 → 候选区 → 按需检索（不常驻注入）→ 成熟蒸馏为技能（**只标记不判定**，成熟/合并人工兜底）
+
+## 架构总览
+
+```
+宿主层    Hermes │ dsh(EAC / cordis) │ 观测舱 GUI │ …任何能 spawn Python 子进程的宿主
+          integrations/ 薄适配层：只读检索 + 向 pending/ 追加候选（宿主不直接写记忆）
+                           │
+                           ▼
+数据根    MEMORY_ECOLOGY_ROOT：memories/ · experiences/ · pending/ · 门日志
+                           ▲
+                           │ 读写仅限唯一调度器（单写入方纪律）
+                           │
+治理核心   src/memory_ecology（零宿主依赖，规则驱动为主）
+          ├─ 四道门     ① 写入整合 → ② 巩固/配额 → ③ 蒸馏 → ④ 复核
+          ├─ 经验笔记本  信号捕获 → 候选区 → 按需检索 → 人工兜底 → 技能
+          └─ 检索消费端  memory_query / eco_note_query
+```
+
+## 和「向量 RAG / Mem0 式记忆」的区别
+
+多数记忆方案回答的核心问题是「**怎么召回**」（embedding → 向量库 → 检索拼接）；本项目的重心在它
+前面的一层：「**记忆的生命周期怎么治理**」——写入、合并、挤出、蒸馏、遗忘、复核，检索只是治理
+结果的消费端。
+
+| 维度 | 典型向量 RAG 记忆 | 本项目 |
+|---|---|---|
+| 增长模型 | 只进不出，越攒越脏 | 配额恒有界（门②）+ 遗忘曲线（门④） |
+| 事实冲突 | 新旧并存，召回看运气 | 矛盾失效 superseded → 隔离区，历史可追溯 |
+| 删除 | 物理删除或放任 | 代码层禁用物理删除，一切状态转换可逆 |
+| 做事经验 | 与事实混在同一库 | 独立经验笔记本：按需检索、只标记不判定、人工兜底后技能化 |
+| 依赖 | 通常绑定 embedding 服务 | 规则优先、离线可用；LLM 仅门①终审与门③措辞 |
+| 宿主 | 单应用视角 | 共享数据根 + 单写入方纪律，多宿主并存 |
+
+> 简化对比，仅供定位：各家方案均在演进，以官方文档为准。另注意本项目的检索当前为词面级
+> （见顶部「当前边界」），召回质量不是它的卖点——生命周期治理才是。
 
 ## 仓库结构
 
@@ -109,6 +154,10 @@ python eco_health_check.py
 展示如何把核心接到"有会话库和调度器的宿主"上。其他宿主照此模式写适配器。
 
 ### 4) 观测舱 GUI（可选，人类宿主）
+
+<!-- 截图占位：截一张观测舱主界面存为 docs/gui-observatory.png 后取消下面两行注释
+![观测舱 GUI](docs/gui-observatory.png)
+-->
 
 ```bash
 # 方式一：命令行启动（默认 127.0.0.1:8788，自动开窗口）
