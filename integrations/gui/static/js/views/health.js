@@ -25,7 +25,7 @@ RENDER.health = async function (v) {
         <span class="chip">归档 <b>${archives.length}</b> 份</span>
       </div>
     </div>
-    <div class="htabs pills">${[['report', '体检报告'], ['archive', '归档时间轴'], ['compare', '双报告对比'], ['history', '评分历史'], ['eval', '评测门禁'], ['backups', '备份岩层']]
+    <div class="htabs pills">${[['report', '体检报告'], ['archive', '归档时间轴'], ['compare', '双报告对比'], ['history', '评分历史'], ['eval', '评测门禁'], ['retrieval', '检索质量'], ['backups', '备份岩层']]
       .map(([k, n]) => `<button data-ht="${k}" class="${T === k ? 'on' : ''}">${n}</button>`).join('')}</div>
     <div id="health-body"></div>`;
   const body = $('#health-body', v);
@@ -89,6 +89,30 @@ RENDER.health = async function (v) {
          ${d.evals.length > 1 ? `<div class="card"><h3>历史评测</h3>${d.evals.map(e =>
            `<div class="eval-item" data-eval="${esc(e.name)}">${esc(e.name)}</div>`).join('')}</div>` : ''}`
       : '<div class="empty">尚无评测报告（跑一次 python eco_eval.py --gate 生成）。</div>';
+  } else if (T === 'retrieval') {
+    // 检索质量（v2.3.0 S4）：零结果率 = difflib→ngram→embedding 默认化决策的在线证据链
+    body.innerHTML = '<div class="card"><h3>检索质量 <small>零结果也落行 · 只读观测（数据源 .memory_hits.jsonl）</small></h3><div class="loading">读取中…</div></div>';
+    EcoApi.get('/api/retrieval?days=30').then(r => {
+      if (!r.ok) { body.innerHTML = `<div class="empty">读取失败：${esc(r.error || '未知')}</div>`; return; }
+      if (!r.total_queries) {
+        body.innerHTML = '<div class="empty-ok">暂无检索遥测（memory_query 每次查询都会落行，零结果也落；跑几次检索后这里就有趋势）。</div>';
+        return;
+      }
+      const rate = (r.zero_rate * 100).toFixed(1);
+      const cls = r.zero_rate > 0.4 ? 'bad' : r.zero_rate > 0.2 ? 'warn' : 'ok';
+      body.innerHTML = `<div class="card"><h3>检索质量 <small>近 30 天 · 零结果率是检索质量头号在线诊断信号</small></h3>
+        <div class="row">
+          <span class="chip">查询 <b>${r.total_queries}</b> 次</span>
+          <span class="chip">零结果 <b>${r.zero_queries}</b> 次</span>
+          <span class="tag ${cls}">零结果率 ${rate}%</span>
+        </div>
+        <table style="margin-top:10px"><tr><th>日期</th><th>查询</th><th>零结果</th><th>零结果率</th><th>平均命中</th></tr>
+        ${(r.by_day || []).slice(-14).map(x => `<tr><td>${esc(x.date)}</td><td class="num">${x.total}</td>
+          <td class="num">${x.zero}</td><td class="num">${(x.zero_rate * 100).toFixed(1)}%</td>
+          <td class="num">${x.avg_hits}</td></tr>`).join('')}</table></div>
+        ${(r.top_zero_queries || []).length ? `<div class="card"><h3>零结果查询 Top <small>候选动作：换关键词 / 语义层缺口 / 库里真没有</small></h3>
+          ${r.top_zero_queries.map(z => `<div class="row"><span class="tag warn">${z.count}×</span><span>${esc(z.query)}</span></div>`).join('')}</div>` : ''}`;
+    }).catch(e => { body.innerHTML = `<div class="empty">读取失败：${esc(e.message)}</div>`; });
   } else {
     body.innerHTML = `<div class="card"><h3>备份岩层 <small>备份链=地质沉积层，越深越旧（目录实时统计）</small></h3>
       ${d.backups.length ? `<div class="strata">${d.backups.slice(0, 16).map(b =>

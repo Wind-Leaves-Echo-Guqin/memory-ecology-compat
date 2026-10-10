@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""双树一致性校验（2026-10-04）——防止 compat 与 兼容版/hermes 的共有脚本继续漂移。
+"""双树一致性校验（2026-10-04）——防止 compat 与 dev/hermes 的共有脚本继续漂移。
 
 背景：审计发现 compat 缺捕获链 12 文件（设计如此，捕获链依赖宿主 state.db），
 但共有文件（四道门+lib）曾长期双头修改导致版本漂移（bak 文件群为证）。
@@ -21,7 +21,7 @@ from pathlib import Path
 
 COMPAT = Path(__file__).resolve().parent.parent / "src" / "memory_ecology"
 TARGETS = [
-    Path.home() / "memory-ecology-兼容版" / "scripts",
+    Path.home() / "memory-ecology-dev" / "scripts",
     Path.home() / "AppData" / "Local" / "hermes" / "scripts",
 ]
 # 捕获链/宿主专属：compat 没有属正常（不报缺失、不同步）
@@ -33,7 +33,8 @@ HOST_ONLY = {
 
 
 def md5(p: Path) -> str:
-    return hashlib.md5(p.read_bytes()).hexdigest()
+    # 行尾归一化后比对：兼容版/live 为 CRLF、compat 为 LF，字节级 md5 会产生幻影漂移
+    return hashlib.md5(p.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
 def sync_one(src: Path, targets: list[Path], ts: str, do_sync: bool, rel: str) -> tuple[int, int]:

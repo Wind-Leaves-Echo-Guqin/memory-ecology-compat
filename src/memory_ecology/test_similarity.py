@@ -73,6 +73,93 @@ class TestBackendSwitch(unittest.TestCase):
             self.assertGreater(s, 0.99)  # 回退 ngram：相同文本 → 1.0
 
 
+class TestGateThreshold(unittest.TestCase):
+    """门阈值后端感知（2026-10-04 迁移）：换后端阈值自动跟随，缺模型回退也跟随。"""
+
+    def test_difflib_locked(self):
+        """默认 difflib：门阈值 = 旧值（行为锁定，不漂移）。"""
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(similarity.gate_threshold("suspect", 0.5), 0.50)
+            self.assertEqual(similarity.gate_threshold("merge", 0.8), 0.80)
+            self.assertEqual(similarity.gate_threshold("noop", 0.95), 0.95)
+            self.assertEqual(similarity.gate_threshold("candidate", 0.7), 0.70)
+
+    def test_ngram_migrated(self):
+        with mock.patch.dict("os.environ", {"MEMORY_ECOLOGY_SIM_BACKEND": "ngram"}):
+            self.assertEqual(similarity.gate_threshold("merge", 0.8), 0.58)
+            self.assertEqual(similarity.gate_threshold("suspect", 0.5), 0.42)
+
+    def test_embedding_migrated(self):
+        with mock.patch.dict("os.environ", {"MEMORY_ECOLOGY_SIM_BACKEND": "embedding"}), \
+             mock.patch.object(similarity, "effective_backend", return_value="embedding"):
+            self.assertEqual(similarity.gate_threshold("merge", 0.8), 0.84)
+            self.assertEqual(similarity.gate_threshold("noop", 0.95), 0.97)
+
+    def test_embedding_unavailable_uses_ngram_threshold(self):
+        """配置 embedding 但模型缺失 → 分数走 ngram 回退，阈值也必须取 ngram 值
+        （否则"阈值按 embedding 校准、分数来自 ngram"静默错配）。"""
+        with mock.patch.dict("os.environ",
+                             {"MEMORY_ECOLOGY_SIM_BACKEND": "embedding",
+                              "MEMORY_ECOLOGY_MODELS": "Z:/definitely/missing"}), \
+             mock.patch.object(similarity, "_EMBED_FAILED", False), \
+             mock.patch.object(similarity, "_EMBEDDER", None):
+            self.assertEqual(similarity.effective_backend(), "ngram")
+            self.assertEqual(similarity.gate_threshold("merge", 0.8), 0.58)  # ngram 值
+
+    def test_env_override(self):
+        with mock.patch.dict("os.environ", {"MEMORY_ECOLOGY_SIM_THRESHOLD_MERGE": "0.66"}):
+            self.assertEqual(similarity.gate_threshold("merge", 0.8), 0.66)
+
+    def test_unknown_role_falls_back(self):
+        with mock.patch.dict("os.environ", {"MEMORY_ECOLOGY_SIM_BACKEND": "ngram"}):
+            self.assertEqual(similarity.gate_threshold("nonexistent", 0.33), 0.33)
+
+
+class TestModelPathResolution(unittest.TestCase):
+    def test_env_override_wins(self):
+        with mock.patch.dict("os.environ", {"MEMORY_ECOLOGY_MODELS": "X:/custom"}):
+            self.assertEqual(similarity.models_root(), Path("X:/custom"))
+
+    def test_default_root_is_hermes_not_cwd(self):
+        """默认模型根 = <生态根>/models，而非 CWD/models（回归 2026-10-04 踩坑）。
+
+        旧实现用 Path(".")/models：cron 以任意 CWD 启动时静默找不到模型 → 回退 ngram，
+        生产 embedding 从未真正生效。本测试在临时 CWD 下断言默认根不随 CWD 漂移。
+        """
+        import tempfile
+        with mock.patch.dict("os.environ", {}, clear=True):
+            with tempfile.TemporaryDirectory() as other:
+                with mock.patch("os.getcwd", return_value=other):
+                    root = Path(similarity.models_root())
+                    self.assertNotEqual(str(root).replace("\\", "/"),
+                                        other.replace("\\", "/") + "/models")
+                    self.assertTrue(str(root).replace("\\", "/").endswith("/models"))
+
+
+class TestEmbedderCache(unittest.TestCase):
+    def test_embed_cache_hit(self):
+        """同一文本重复 embed 命中缓存（门④两两比较会重复 embed 同一正文）。"""
+        emb = similarity.OnnxEmbedder.__new__(similarity.OnnxEmbedder)
+        emb._cache = {}
+        calls = []
+
+        class FakeTok:
+            def encode(self, s):
+                calls.append(s)
+                return type("E", (), {"ids": [1, 2, 3]})()
+
+        class FakeSess:
+            def run(self, *a, **k):
+                import numpy as np
+                return [np.ones((1, 3, 4))]  # (batch, seq=max_len, hidden)
+
+        emb.tokenizer, emb.sess = FakeTok(), FakeSess()
+        emb.max_len, emb.pooling = 3, "mean"  # 与 ids 等长 → pad=0，mask 形状对齐
+        emb.embed("同一文本")
+        emb.embed("同一文本")
+        self.assertEqual(len(calls), 1)  # 第二次命中缓存，未再编码
+
+
 class TestIsSame(unittest.TestCase):
     def test_threshold(self):
         with mock.patch.dict("os.environ", {"MEMORY_ECOLOGY_SIM_BACKEND": "ngram"}):

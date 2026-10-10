@@ -24,6 +24,7 @@ import json
 import re
 import sys
 import urllib.request
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -38,11 +39,15 @@ PENDING_DIR = EXP_DIR / "pending"
 WATERMARK = EXP_DIR / ".watermark"
 USAGE_LOG = EXP_DIR / ".usage.jsonl"   # v1.1-7a：LLM usage 日账（每成功请求一行 JSON）
 
-MAX_SIGNALS = 8           # 单次最多处理信号簇（token 熔断，demo 保守）
+MAX_SIGNALS = 32          # 单次最多处理信号簇（token 熔断；2026-10-05 由 8 上调：冻结期积压需清淤）
 CTX_BEFORE = 6            # 信号前取多少条消息
 CTX_AFTER = 3             # 信号后取多少条消息
 CTX_MSG_CAP = 400         # 单条消息截断长度
-MAX_OUTPUT = 6            # 单次最多产出的候选条数
+MAX_OUTPUT = 12           # 单次最多产出的候选条数（2026-10-05 由 6 上调：清淤期配合库级去重）
+DUP_THRESHOLD = 0.30      # 库级去重阈值（2026-10-05 移植自 live）：候选(trigger+action) 与
+                          # 既有条目(title+action) 的 bigram 余弦 ≥ 该值 → 同一课跳过。
+                          # 实测校准：换序重复对 0.39~0.77、不同课 ≤0.19；difflib 对
+                          # 换序只有 0.19~0.57 不可用，故内联 stdlib bigram 余弦（零依赖）。
 
 PROMPT = """你是经验提取器。以下是 AI agent 最近一次会话中的片段（围绕报错/用户纠正/验证动作）。
 从中提取「以后还会遇到的 agent 做事经验」——已验证链路、已知坑、被证伪的尝试、通用做法。
@@ -119,6 +124,81 @@ def log_usage(resp: dict) -> None:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except OSError as e:
         print(f"⚠️ usage 记账失败（不影响提取）: {e}")
+
+
+def _norm(s: str) -> str:
+    """与 src/memory_ecology/lib/similarity.py 同口径：仅保留字母数字并转小写。"""
+    if not s:
+        return ""
+    return "".join(ch.lower() for ch in s if ch.isalnum())
+
+
+def _ngram(s: str, n: int = 2):
+    """字符 n-gram 计数（超短串退化为单字符）。stdlib Counter，零宿主依赖。"""
+    s = _norm(s)
+    if not s:
+        return Counter()
+    if len(s) < n:
+        return Counter(s)
+    return Counter(s[i:i + n] for i in range(len(s) - n + 1))
+
+
+def _cosine(c1, c2) -> float:
+    if not c1 or not c2:
+        return 0.0
+    common = set(c1) & set(c2)
+    num = sum(c1[t] * c2[t] for t in common)
+    den = (sum(v * v for v in c1.values()) ** 0.5) * (sum(v * v for v in c2.values()) ** 0.5)
+    return num / den if den else 0.0
+
+
+def load_existing_lessons() -> list[str]:
+    """库级去重语料（2026-10-05 移植自 live）：正式库每条的 title+action，加上
+    pending/ 全部候选行的 trigger（含已被 adopt 标记 accepted 的行）。
+
+    根因背景：水位线冻结重扫 + LLM 对同一课的换序改写，会让同一经验每日再产候选；
+    旧版 seen_global 只读当天 pending 文件，跨日/对库都拦不住。本语料在写出前做
+    最后一道去重。
+    """
+    texts: list[str] = []
+    for p in sorted(EXP_DIR.glob("exp-*.md")):
+        try:
+            t = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        m_title = re.search(r"^title:\s*(.+)$", t, re.M)
+        if not m_title:
+            continue
+        m_act = re.search(r"^action:\s*(.+)$", t, re.M)
+        texts.append(m_title.group(1).strip() + " " + (m_act.group(1).strip() if m_act else ""))
+    if PENDING_DIR.exists():
+        for p in sorted(PENDING_DIR.glob("*.md")):
+            try:
+                lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                m = re.match(r"^(?:<!--[^>]*-->)?\s*-\s*\[\w+\]\s*\*\*(.+?)\*\*", line)
+                if m:
+                    texts.append(m.group(1))
+    return texts
+
+
+def find_library_dup(trigger: str, action: str, corpus: list[str]) -> str | None:
+    """候选是否与既有课重复：返回最相似的既有文本（≥DUP_THRESHOLD）或 None。
+
+    口径：候选侧 trigger+action，库侧 title+action（pending 行只有 trigger），
+    bigram 余弦对 LLM 换序改写不敏感（实测换序重复 0.39~0.77、不同课 ≤0.19）。
+    """
+    if not corpus:
+        return None
+    q = _ngram(f"{trigger} {action or ''}")
+    best, best_s = None, 0.0
+    for t in corpus:
+        s = _cosine(q, _ngram(t))
+        if s > best_s:
+            best, best_s = t, s
+    return best if best_s >= DUP_THRESHOLD else None
 
 
 def llm_extract(fragments: list[str], max_tokens: int = 2000, retries: int = 2) -> list[dict]:
@@ -274,6 +354,9 @@ def main() -> int:
     batch_no = 0
     total_written = 0  # 跨批累计（2026-09-02 抗压测试发现：每批独立计数+break 会静默丢候选）
     batch_failed = False
+    # 库级去重语料（2026-10-05 移植）：正式库 + 全部 pending 候选，整轮载入一次。
+    # 背景：水位线冻结重扫 + LLM 换序改写让同一课每日再产候选（实测同两课连采 7 天）。
+    corpus = load_existing_lessons()
     while True:
         batch_no += 1
         signals, _full_max_ts = scan_signals(watermark)
@@ -339,6 +422,12 @@ def main() -> int:
                 if t in seen_cands:
                     continue
                 seen_cands.add(t)
+                # 库级去重（2026-10-05 移植自 live）：与既有课换序等价 → 不写出，不占候选额度
+                act = str(it.get('action') or '').replace("\n", " ").replace("\r", " ")
+                dup = find_library_dup(t, act, corpus)
+                if dup is not None:
+                    print(f"  ↷ 跳过库级重复候选: {t[:40]}（≈ {dup[:36]}…）")
+                    continue
                 total_in_batch += 1
                 total_written += 1
                 if total_written > MAX_OUTPUT:

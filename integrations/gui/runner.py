@@ -103,3 +103,18 @@ def search(kind: str, q: str) -> dict:
         return {"ok": ok, "kind": kind, "hits": hits,
                 "raw": out if not hits else None, "error": None if ok else out}
     return {"ok": False, "error": f"未知检索类型 {kind}"}
+
+
+def retrieval_report(days: int = 30) -> dict:
+    """检索质量报告（S4 零结果率观测，v2.3.0）——CLI eco_retrieval_report.py --format json。
+
+    数据源 memories/.memory_hits.jsonl（零结果也落行）；零结果率 = difflib→ngram→embedding
+    默认化决策的在线证据链。fail-open：任何失败返回 {'ok': False, 'error': ...}。"""
+    ok, out = _run(["eco_retrieval_report.py", "--days", str(int(days)), "--format", "json"])
+    if not ok:
+        return {"ok": False, "error": out}
+    try:
+        data = json.loads(out[out.index("{"):out.rindex("}") + 1])
+        return {"ok": True, **data}
+    except (ValueError, IndexError):
+        return {"ok": False, "error": (out or "")[:300]}

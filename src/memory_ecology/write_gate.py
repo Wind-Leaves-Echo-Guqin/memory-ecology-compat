@@ -42,8 +42,10 @@ LOG_DIR = HERMES / "memories" / "gate_log"
 DB = HERMES / "eco.db"
 LOCK = HERMES / "scripts" / ".write_gate.lock"
 
-SIM_NEAR = 0.80      # 近似重复（UPDATE/NOOP 候选）
-SIM_SUSPECT = 0.50   # 疑似冲突窗口下界
+SIM_NEAR = 0.80      # 近似重复（UPDATE/NOOP 候选）——difflib 口径默认值
+SIM_SUSPECT = 0.50   # 疑似冲突窗口下界——difflib 口径默认值
+# 注：实际取值经 similarity.gate_threshold() 按生效后端解析（换 embedding 时自动迁移，
+# 见 lib/similarity.py::GATE_THRESHOLDS）；上面两常量仅为文档化的 difflib 基准。
 MAX_BODY = 200       # detail 正文上限
 MAX_OUTPUT = 8       # 单次最多处理候选条数
 ACTIONS = ("ADD", "UPDATE", "NOOP", "CONFLICT")
@@ -51,9 +53,9 @@ ACTIONS = ("ADD", "UPDATE", "NOOP", "CONFLICT")
 PROMPT = """你是记忆整合器。以下是提取出的候选记忆（可能附带相似已有条目）。
 对每条候选给出 type 和 action：
 type: semantic(长期事实/偏好/属性) | episodic(一次性事件) | procedural(流程/做法) | lesson(教训)
-action: ADD(新增) | UPDATE(与已有条目近似重复,应合并计数) | NOOP(无记忆价值) | CONFLICT(与已有条目同主题但事实相反/矛盾,旧条目应失效)
+action: ADD(新增) | UPDATE(与已有条目近似重复/补充佐证,应合并计数) | NOOP(无记忆价值) | CONFLICT(与已有条目同主题但事实相反/矛盾,旧条目应失效)
 规则: 一次性临时内容即使新增也标 episodic; 近似重复优先 UPDATE; 同主题相反事实必须 CONFLICT; 琐碎无价值 NOOP。
-输出 JSON 数组, 每项 {"idx": 数字, "type": "...", "action": "...", "target": "相似条目slug或空串", "note": "一句话理由"}。只输出 JSON。
+输出 JSON 数组, 每项 {"idx": 数字, "type": "...", "action": "...", "target": "相似条目slug或空串", "note": "一句话理由", "reason": "仅 action=CONFLICT 时必填:一句话说明新旧冲突点(旧条目为什么失效,如'之前用X,现已迁移到Y')"}。只输出 JSON。
 
 候选与相似条目:
 {context}
@@ -116,6 +118,10 @@ def add_entry(detail_dir: Path, text: str, fm_extra: dict) -> Path:
         "last_verified": now,
         "origin_session_id": fm_extra.get("origin_session_id", ""),
         "superseded_by": "",
+        # v2.3.0 证据链：CONFLICT 换代时指向被取代的旧条目 slug（与旧条目 superseded_by 互指）；
+        # 常规 ADD 时回退记 origin_session_id。逗号分隔，条目 slug 字符集内无逗号，可安全拆分。
+        "evidence": str(fm_extra.get("evidence") or fm_extra.get("origin_session_id", "") or ""),
+        "distilled_at": "",
     }
     path = safeio.safe_entry_path(detail_dir, slug_of(text))
     if path.exists():
@@ -158,11 +164,18 @@ def update_entry(d: dict) -> None:
     safeio.write_entry(d["path"], dump_frontmatter(fm, body), kind="detail")
 
 
-def supersede_entry(d: dict, new_slug: str, quarantine_dir: Path) -> Path:
-    """矛盾旧条目：标 superseded 后移入 quarantine（保留可回滚）。"""
+def supersede_entry(d: dict, new_slug: str, quarantine_dir: Path, reason: str = "") -> Path:
+    """矛盾旧条目：标 superseded 后移入 quarantine（保留可回滚）。
+
+    v2.3.0：失效带理由（deja-vu「rejected 随命中返回」同思想）——
+    superseded_reason = 一句话冲突点（检索命中失效条目时原样返回），
+    superseded_at = 失效日期（隔离区由此成为可查历史时间轴，而非垃圾箱）。"""
     fm = dict(d["fm"])
     fm["status"] = "superseded"
     fm["superseded_by"] = new_slug
+    fm["superseded_at"] = datetime.date.today().isoformat()
+    fm["superseded_reason"] = (reason or "").strip()
+    fm["distilled_at"] = ""  # v2.3.0 证据链：源失效 → 蒸馏状态位清空（复活后可重蒸馏）
     date_dir = quarantine_dir / datetime.date.today().isoformat()
     date_dir.mkdir(parents=True, exist_ok=True)
     target = date_dir / d["path"].name
@@ -277,6 +290,9 @@ def _run(args) -> int:
     today = datetime.date.today().isoformat()
     report = []
     failures = 0
+    # 阈值按生效后端解析一次（换 embedding 时自动迁移；缺模型回退 ngram 也自动跟随）
+    sim_near = similarity.gate_threshold("merge", SIM_NEAR)
+    sim_noop = similarity.gate_threshold("noop", 0.95)
 
     for c in cands:
         key = f"{c['file']}|{c['raw']}"
@@ -287,7 +303,7 @@ def _run(args) -> int:
             log_gate(conn, fp, "NOOP", "", "空内容", args.dry_run)
             terminal.add(key)
             continue
-        sims = find_similar(text, detail, SIM_SUSPECT)
+        sims = find_similar(text, detail, similarity.gate_threshold("suspect", SIM_SUSPECT))
         decision = None
         if sims:
             # 有相似命中：调 LLM 决策（上下文只带当前候选 + 相似条目，省 token）
@@ -306,8 +322,8 @@ def _run(args) -> int:
         # 规则兜底
         if decision is None:
             ctype = rule_type(text)
-            if sims and sims[0]["ratio"] >= SIM_NEAR:
-                action = "UPDATE" if sims[0]["ratio"] < 0.95 else "NOOP"
+            if sims and sims[0]["ratio"] >= sim_near:
+                action = "UPDATE" if sims[0]["ratio"] < sim_noop else "NOOP"
             else:
                 action = "ADD"
             decision = {"type": ctype, "action": action, "target": sims[0]["detail"]["name"] if sims else "", "note": "规则兜底"}
@@ -316,17 +332,17 @@ def _run(args) -> int:
         if action not in ACTIONS:
             # LLM 输出了非法动作：回退规则判定（不写 NOOP 指纹，不静默丢弃）
             ctype = rule_type(text)
-            if sims and sims[0]["ratio"] >= SIM_NEAR:
-                action = "NOOP" if sims[0]["ratio"] >= 0.95 else "UPDATE"
+            if sims and sims[0]["ratio"] >= sim_near:
+                action = "NOOP" if sims[0]["ratio"] >= sim_noop else "UPDATE"
             else:
                 action = "ADD"
             decision = {"type": ctype, "action": action,
                         "target": sims[0]["detail"]["name"] if sims else "", "note": "非法action回退规则"}
-        # LLM 在线时也可能对完全同文（≥0.95）判 UPDATE——与规则兜底同口径钳制为 NOOP，
+        # LLM 在线时也可能对完全同文（≥noop）判 UPDATE——与规则兜底同口径钳制为 NOOP，
         # 防 occurrences 被同一文本反复膨胀（P1）
-        if decision.get("action") == "UPDATE" and sims and sims[0]["ratio"] >= 0.95:
+        if decision.get("action") == "UPDATE" and sims and sims[0]["ratio"] >= sim_noop:
             decision = dict(decision, action="NOOP",
-                            note=decision.get("note", "") + "（≥0.95 同文钳制为 NOOP）")
+                            note=decision.get("note", "") + f"（≥{sim_noop:.2f} 同文钳制为 NOOP）")
         ctype = decision.get("type", rule_type(text))
         note = decision.get("note", "")
         target = ""
@@ -356,13 +372,17 @@ def _run(args) -> int:
                 hit = _match_target(decision, sims)
                 if hit:
                     target = hit["name"]
+                    # v2.3.0：失效理由 = LLM 的 reason（缺失回退 note；规则兜底路径不产生 CONFLICT）
+                    conflict_reason = (decision.get("reason") or decision.get("note") or "").strip()
                     if not args.dry_run:
                         # R10（v2.2.0 review）：先失效旧条目再写新条目；P1 补强——
                         # 写新失败时把旧条目从 quarantine 原位还原（fm 快照是 supersede 前的），
                         # 候选下轮可重试，不再留下「旧条目已废 + 新条目未落盘」且随 .done 丢失的半程态
-                        qtarget = supersede_entry(hit, slug_of(text), QUARANTINE_DIR)
+                        qtarget = supersede_entry(hit, slug_of(text), QUARANTINE_DIR, reason=conflict_reason)
                         try:
-                            p = add_entry(args.detail, text, {"type": ctype})
+                            # v2.3.0 证据链：新条目 evidence 指向被取代旧条目（与旧条目 superseded_by 互指，
+                            # 从任一侧可追溯完整换代链：Hindsight「矛盾保留历史」/腾讯 L0 回落同思想）
+                            p = add_entry(args.detail, text, {"type": ctype, "evidence": target})
                         except Exception:
                             try:
                                 os.replace(qtarget, hit["path"])
@@ -371,10 +391,12 @@ def _run(args) -> int:
                             except Exception as e2:
                                 print(f"⚠️ 旧条目还原失败（quarantine 副本仍在，可人工恢复）: {e2}")
                             raise
-                        report.append(f"CONFLICT {text[:40]} → 新条目 {p.stem}，旧条目 {target} 已 superseded→quarantine {note}")
-                        log_gate(conn, fp, "CONFLICT", target, f"new={p.stem} {note}", args.dry_run)
+                        report.append(f"CONFLICT {text[:40]} → 新条目 {p.stem}，旧条目 {target} 已 superseded→quarantine "
+                                      f"失效理由: {conflict_reason} {note}")
+                        log_gate(conn, fp, "CONFLICT", target, f"new={p.stem} reason={conflict_reason} {note}", args.dry_run)
                     else:
-                        report.append(f"CONFLICT {text[:40]} → (dry-run) 旧条目 {target} 将失效")
+                        report.append(f"CONFLICT {text[:40]} → (dry-run) 旧条目 {target} 将失效"
+                                      f"（理由: {conflict_reason}）")
                         log_gate(conn, fp, "CONFLICT", target, note, args.dry_run)
                 else:
                     report.append(f"CONFLICT {text[:40]} → 无目标条目，按 ADD 处理")

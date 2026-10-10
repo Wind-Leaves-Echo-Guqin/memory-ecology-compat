@@ -1,5 +1,53 @@
 # Changelog
 
+## v2.4.0（2026-10-07）——向量缓存（灰度）· OR 召回 + RRF 融合
+
+> 外部调研落地第二期。纪律不变：**新能力全部默认关闭**，观察期后另行决定默认化。
+
+- **S6 向量缓存 shadow index（memory_query --semantic / lib/vector_cache.py）**：
+  SQLite BLOB 存归一化向量（零 numpy，array('f') 互转）；条目级 content_hash(sha256)
+  增量——未变跳过重嵌（memsearch/EverOS 同配方）；模型名变化整库失效（向量空间不可混）；
+  prune 镜像删除；单条重嵌失败跳过不阻塞（**缓存一律可丢弃：坏/删=无损，源真源仍是 Markdown**）。
+  `--semantic` 向量检索路（余弦 + 时间衰减 + 状态罚分），embedding 不可用自动回退词面并提示；
+  `MEMORY_ECOLOGY_VECTOR_CACHE` 可覆盖缓存路径。**灰度：默认后端仍 difflib，观察期后定默认**
+- **S7 OR 召回 + RRF 融合（memory_query --recall）**：原计划 FTS5 双路，实测三配置均不适合中文
+  （porter 英文专用；trigram 要求 ≥3 字符而中文常用词恰 2 字，「备份」「框架」全零；unicode61
+  与子串路高度重合）——按「对比排序变化幅度后才合入」纪律改道：**or_recall** 任一 term 命中即召回
+  （补多词 AND 的召回缺口：实测「记忆 检索」AND=0 而 OR=5），**rrf_fuse**（Cormack 2009，K=60）
+  按名次融合两路（两路分值口径不同，只吃名次）。`--recall` 默认关闭=**行为锁定**；
+  实测 91 条语料「记忆 检索」默认零命中 → `--recall` 召回 5 条相关条目
+- 测试：新增 test_vector_cache（9）/ test_recall_rrf（10）共 19 用例
+- FTS5 降级登记为 >1000 条的规模化路径（ARCHITECTURE_TODO §三）
+
+## v2.3.0（2026-10-07）——时间维检索 · 证据链 · 零结果率观测
+
+> 本轮源自 20+ 外部记忆系统调研（~/.memory-ecology/designs/外部记忆系统调研-v1.0.md）：
+> 三个被多项目独立收敛的原则中，superseded 隔离区与 git 基因库已被验证，**证据链溯源**是补上的那块。
+
+- **S1 时间维检索（memory_query）**：score_entry 时间衰减扩为三档半连续
+  （≤7d +10 / ≤30d +5 既有操作点不动，31–120d 线性 5→0 消除 30 天硬悬崖）；回退链
+  last_hit→last_seen→valid_time→first_seen——旧格式无 last_hit 的存量条目零迁移参与打分；
+  新增 `--since/--until/--window` 按「发生时间」（valid_time→transaction_time→first_seen）过滤，
+  无时态条目跳过并计数（Hindsight time-window 语义：时间窗查询只匹配有时间的记忆）；
+  json 补 valid_time/transaction_time。首次消费 Graphiti 双时态轻量版的时间维
+- **S2 矛盾三态+失效带理由（write_gate/memory_query）**：门① CONFLICT 失效理由入条目
+  （superseded_reason=LLM reason 键 + superseded_at 失效日期）——隔离区从垃圾箱变可查历史
+  时间轴（graphiti/EverOS deprecated_by/deja-vu rejected 五处独立收敛的「失效不删除」补全）；
+  memory_query 命中失效条目返回「已失效：理由（被 X 取代）」，复活提案表带失效原因列
+- **S3 证据链（write_gate/distill_stage/memory_query）**：CONFLICT 换代的新条目 evidence
+  指向被取代旧条目（与旧条目 superseded_by 互指，换代链双向可溯）；门③候选落盘即登记源条目
+  distilled_at（Hindsight consolidated_at 同思想，只标记不判定）；源失效/复活清空 distilled_at
+  → 下轮门③重蒸馏，「源变→结论待更新」可逆闭环
+- **S4 零结果率观测（新 eco_retrieval_report + GUI）**：聚合 .memory_hits.jsonl（零结果也落行）
+  → 按日零结果率/平均命中/零结果查询 Top N；GUI health 页新增「检索质量」页签。
+  零结果率是 difflib→ngram→embedding 默认化决策的在线证据（OpenViking observer 同思想）
+- **修复**：memory_query.scan_memory_dirs/revive 默认参数 def 时绑定 → 测试 patch 模块路径失效
+  （改调用时解析）；sync_trees_check 行尾归一化（CRLF 幻影漂移 34→16，剩余为真实内容漂移）
+- **回迁**：live 2026-10-05 蒸馏三修复（STABLE_DAYS=14 稳定口径 / 推理模型预算阶梯 / 批量 env）
+  进 compat 与兼容版；live eco_git_commit 基因库排除 .lock 修复进兼容版
+- 测试：新增 test_memory_query_time（7）/ test_write_gate_conflict_tri（10）/
+  test_evidence_chain（8）/ test_retrieval_report（6）共 31 用例
+
 ## v2.2.5（2026-09-30）
 
 - **修复（关键）**：dsh 内核 v4 拒收 `source.kind='plugin'` 的注入消息——改为 producer 自己的

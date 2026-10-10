@@ -20,13 +20,14 @@
 import argparse
 import datetime
 import json
+import os  # 2026-10-05：MEMORY_ECOLOGY_DISTILL_BATCH 首轮清淤批量覆盖
 import re
 import shutil
 import sqlite3
 import sys
 from pathlib import Path
 
-from lib.config import hermes_root
+from lib.config import hermes_root, cfg
 from lib.fs import atomic_write, norm, slug_of
 from lib import llm as _llm
 from lib import similarity
@@ -50,7 +51,13 @@ USER_QUOTA = 1500       # USER.md 字符配额
 USER_WATERMARK = 0.90   # USER 占用 >90% 暂停蒸馏
 MIN_OCC = 2             # 候选 occurrences 门槛
 MIN_SESS = 2            # 候选 session_count 门槛
-REPLACE_RATIO = 0.80    # 同义替换阈值（相似但非同义 → 不替换，防误伤行为规则）
+STABLE_DAYS = 14        # 驻留稳定口径（2026-10-05）：first_seen 早于该天数且仍 active
+                        # 视为稳定。背景：occurrences 计数依赖同类事实被再次写入且命中
+                        # write_gate 相似合并，词面相似层漏配时条目永久停留 1/1
+                        # （实测 84 条 detail 全部 occurrences=1，画像层自 08-30 起零产出）。
+                        # 可经 configs/eco.toml [distill] stable_days 覆盖。
+REPLACE_RATIO = 0.80    # 同义替换阈值（difflib 口径默认；实际经 gate_threshold 按后端迁移）
+                        # 相似但非同义 → 不替换，防误伤行为规则
 
 PROMPT = """你是用户画像蒸馏器。把一条「已确认的长期记忆」浓缩成一句话用户画像特质。
 要求：1) 保留事实核心，去掉过程细节；2) 用陈述句，第三人称「用户」；3) ≤80 字；
@@ -64,8 +71,16 @@ PROMPT = """你是用户画像蒸馏器。把一条「已确认的长期记忆�
 
 
 def llm_trait(body: str) -> str:
-    content = _llm.complete(PROMPT.replace("{body}", body[:300]),
-                            max_tokens=200, temperature=0.1)
+    # deepseek-v4-flash 为推理模型（2026-10-05 修复）：reasoning_content 先行产出，
+    # 旧预算 200 会被思考全吃光（finish_reason=length）→ content 恒空 → 全面回退
+    # 原文截断。且思考长度随条目复杂度波动大（实测 4086 字符），故预算阶梯重试：
+    # 2000 不够升 6000，仍空才回退原文（LLM 失败不阻断管道的既定语义不变）。
+    prompt = PROMPT.replace("{body}", body[:300])
+    content = ""
+    for budget in (2000, 6000):
+        content = _llm.complete(prompt, max_tokens=budget, temperature=0.1)
+        if content and content.strip():
+            break
     m = re.search(r"\{.*\}", content, re.S)
     if not m:
         return ""
@@ -109,11 +124,13 @@ def user_usage(user_file: Path) -> int:
 
 def find_conflict(trait: str, entries: list[str]) -> str | None:
     """同义替换判定：候选与某条 USER 条目**同义**才返回该条目（整块替换）。
-    同义 = 包含关系（新候选是旧条目的提炼/细化，norm 子串）或高度相似（≥0.8）。
-    相似但非同义（0.45~0.8）→ 返回 None（不替换，避免误伤互补的行为规则——P1-4）。"""
+    同义 = 包含关系（新候选是旧条目的提炼/细化，norm 子串）或高度相似（≥门③阈值）。
+    相似但非同义 → 返回 None（不替换，避免误伤互补的行为规则——P1-4）。
+    阈值经 similarity.gate_threshold('merge') 按生效后端解析（difflib 口径 0.80）。"""
     nt = norm(trait)
     if not nt:
         return None
+    threshold = similarity.gate_threshold("merge", REPLACE_RATIO)
     for e in entries:
         ne = norm(e)
         if not ne:
@@ -121,7 +138,7 @@ def find_conflict(trait: str, entries: list[str]) -> str | None:
         if nt in ne or ne in nt:
             return e  # 包含关系 = 同义
         ratio = similarity.ratio(nt, ne)  # 批 5：统一相似度层
-        if ratio >= REPLACE_RATIO:
+        if ratio >= threshold:
             return e
     return None
 
@@ -184,6 +201,23 @@ def log_distill(conn: sqlite3.Connection, action: str, target: str, note: str, d
         (ts, action, target, note),
     )
     conn.commit()  # P1：逐条落账——中途异常时账本与已落地动作一致（旧版最后才 commit）
+
+
+def _stamp_distilled_at(d: dict, day: str) -> None:
+    """源条目登记 distilled_at（蒸馏状态位，v2.3.0 证据链）。
+
+    只标记不判定纪律不变：此位仅表示「该源已产出一条观察期候选」，
+    不代表画像已收录（promoted 才是）。失败静默——登记不阻塞蒸馏管线。"""
+    try:
+        raw = d["path"].read_text(encoding="utf-8")
+        fm, body = parse_frontmatter(raw)
+        fm["distilled_at"] = day
+        atomic_write(d["path"], dump_frontmatter(fm, body))
+        d["fm"]["distilled_at"] = day
+    except (OSError, ValueError):
+        # ValueError：非法 UTF-8（UnicodeDecodeError）等——「失败静默不阻塞管线」是承诺，
+        # 兜底必须覆盖非 OSError 的读取异常（2026-10-07 OCR 评审）
+        pass
 
 
 def main() -> int:
@@ -324,15 +358,36 @@ def _run(args) -> int:
             if fm.get("source"):
                 cand_sources.add(fm["source"])
     eligible = []
+    try:
+        stable_days = int(cfg("distill", "stable_days", STABLE_DAYS))
+    except (TypeError, ValueError):
+        stable_days = STABLE_DAYS
+    batch_cap = MAX_BATCH
+    try:
+        batch_cap = int(os.environ.get("MEMORY_ECOLOGY_DISTILL_BATCH", MAX_BATCH))
+    except ValueError:
+        pass  # 非法 env 值 → 回退代码默认（首轮清淤可临时调大批量，平时 3）
     for d in detail:
         fm = d["fm"]
         if fm.get("type") != "semantic" or fm.get("status") != "active":
             continue
+        double_hit_ok = False
         try:
-            if int(fm.get("occurrences", "0")) < MIN_OCC or int(fm.get("session_count", "0")) < MIN_SESS:
-                continue
+            double_hit_ok = (int(fm.get("occurrences", "0")) >= MIN_OCC
+                             and int(fm.get("session_count", "0")) >= MIN_SESS)
         except ValueError:
-            continue
+            double_hit_ok = False
+        if not double_hit_ok:
+            # 驻留稳定口径（2026-10-05）：双命中（occurrences≥2）依赖同类事实被再次
+            # 写入并命中 write_gate 相似合并，词面相似层漏配时条目永久停留 1/1
+            # （实测 84 条全部 1/1 → 画像层自 08-30 起零产出）。first_seen 驻留超
+            # STABLE_DAYS 且仍 active 无矛盾，是规则可判的稳定证据（仍然零 LLM 判稳）。
+            try:
+                fs = datetime.date.fromisoformat(str(fm.get("first_seen", ""))[:10])
+            except ValueError:
+                continue
+            if (today - fs).days < stable_days:
+                continue
         nt = norm(d["body"])
         if any(norm(e) == nt for e in user_entries(args.user)):
             continue
@@ -340,7 +395,7 @@ def _run(args) -> int:
             continue
         eligible.append(d)
     eligible.sort(key=lambda d: d["name"])
-    for d in eligible[:MAX_BATCH]:
+    for d in eligible[:batch_cap]:
         if args.dry_run:
             # P1：dry-run 不发起真实 LLM 调用（旧版有网络副作用与费用，且报告与实际执行可能不一致）
             trait = d["body"][:MAX_TRAIT]
@@ -364,6 +419,10 @@ def _run(args) -> int:
                 "status": "observing", "sessions": d["fm"].get("session_count", "?"),
             }
             atomic_write(args.cand / f"{slug}.md", dump_frontmatter(cfm, trait))
+            # v2.3.0 证据链：候选落盘即登记源条目 distilled_at（Hindsight consolidated_at 同思想）
+            # ——源失效（write_gate.supersede_entry）或复活（memory_query.revive）时清空此位，
+            # 下轮门③把该源重新纳入候选，蒸馏随源状态可逆
+            _stamp_distilled_at(d, today.isoformat())
         report.append(f"CAND    {trait[:40]}（源 {d['name']}，观察期 {OBSERVE_DAYS} 天）")
         log_distill(conn, "candidate", slug, f"src={d['name']}", args.dry_run)
 

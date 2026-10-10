@@ -1,5 +1,22 @@
 # Memory Ecology Compat · 版本
 
+- **v2.4.0**（2026-10-07）——向量缓存（灰度）· OR 召回 + RRF 融合（外部调研落地第二期）
+  - S6 向量缓存 shadow index：条目级 content-hash 增量/换模型整库失效/prune 镜像；
+    缓存一律可丢弃（坏=无损）；`--semantic` 向量路 + 自动回退；灰度不切默认
+  - S7 OR 召回 + RRF：原计划 FTS5 实测证伪（porter 英文专用/trigram 需≥3 字符 vs 中文 2 字词/
+    unicode61 与子串路重合）→ 改道零依赖 OR 召回 + RRF(K=60) 融合；`--recall` 默认关=行为锁定
+  - 新增测试 19 用例；FTS5 登记为 >1000 条规模化路径
+
+- **v2.3.0**（2026-10-07）——时间维检索 · 证据链 · 零结果率观测（外部调研落地第一期）
+  - S1 时间维检索：三档半连续衰减（≤7d +10 / ≤30d +5 / 31–120d 线性）+ 发生时间回退链 +
+    `--since/--until/--window` 过滤（valid_time→transaction_time→first_seen）
+  - S2 矛盾失效带理由：superseded_reason/superseded_at 入条目，检索命中返回理由，
+    复活提案带失效原因（隔离区变可查历史时间轴）
+  - S3 证据链：CONFLICT 新旧条目 evidence/superseded_by 互指 + 门③ distilled_at 蒸馏状态位
+    （源失效/复活清空 → 可重蒸馏）
+  - S4 零结果率观测：eco_retrieval_report.py + GUI「检索质量」页签（bge 默认化在线证据）
+  - 修复 scan_memory_dirs/revive def 时绑定默认参数；sync_trees_check 行尾归一化
+
 - **v2.2.5**（2026-09-30）——dsh 适配器审计修复（15 条），新增发布守卫
   - **内核 v4 拒收修复（关键）**：注入消息 source.kind 由 `'plugin'` 改为 producer 自己的
     名字（`'eco-note'`）。dsh 0.2.0-rc.2（hostProtocolVersion 4）的

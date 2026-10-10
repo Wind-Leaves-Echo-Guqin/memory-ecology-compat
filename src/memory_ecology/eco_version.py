@@ -19,7 +19,7 @@ from lib.metrics import MEMORY_TRIGGER as MEM_DISPLAY_MAX, chars_of, parse_l1  #
 HERMES = hermes_root()
 REPO = HERMES / "ecosystem.git"
 OUT = HERMES / "VERSION.md"
-ECOSYSTEM_VERSION = "v2.2.5"  # ⑧ 版本行常量（2026-10-04 统一：此前 README 双提 v2.2.4/v2.2.5、代码 v2.2.0 三方不一致；v3.0.0 仍待架构升级完成时切换并移居 lib）
+ECOSYSTEM_VERSION = "v2.4.0"  # ⑧ 版本行常量（2026-10-04 统一：此前 README 双提 v2.2.4/v2.2.5、代码 v2.2.0 三方不一致；v3.0.0 仍待架构升级完成时切换并移居 lib）
 JOBS = HERMES / "cron" / "jobs.json"
 EXEC_DB = HERMES / "cron" / "executions.db"
 

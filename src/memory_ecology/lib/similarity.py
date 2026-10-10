@@ -55,6 +55,24 @@ def cosine(c1: Counter, c2: Counter) -> float:
 
 # ── L3：本地 ONNX embedding（可选依赖，惰性加载）─────────────────────
 
+def models_root() -> "os.PathLike | object":
+    """模型根目录：MEMORY_ECOLOGY_MODELS 优先，否则 <生态根>/models。
+
+    旧实现用 Path(".")/models（CWD 相对）——cron 以任意 CWD 启动时静默找不到模型
+    而回退 ngram（2026-10-04 实测踩坑：生产 embedding 从未真正生效）。改经
+    lib.config.hermes_root() 单源派生，跨树/跨 CWD 一致。
+    """
+    from pathlib import Path
+    root = os.environ.get("MEMORY_ECOLOGY_MODELS")
+    if root:
+        return Path(root)
+    try:
+        from lib.config import hermes_root
+        return hermes_root() / "models"
+    except Exception:
+        return Path(__file__).resolve().parent.parent.parent / "models"
+
+
 class OnnxEmbedder:
     """本地 embedding 后端（必须离线可用：模型文件本地加载，无网络调用）。
 
@@ -71,18 +89,23 @@ class OnnxEmbedder:
         except ImportError as e:
             raise BackendUnavailable(f"缺依赖（{e}）——pip install onnxruntime tokenizers") from e
         from pathlib import Path
-        root = os.environ.get("MEMORY_ECOLOGY_MODELS")
-        base = Path(root) if root else Path(".").resolve() / "models"
-        self.model_dir = base / model_name
+        self.model_dir = models_root() / model_name
         if not (self.model_dir / "model.onnx").is_file():
             raise BackendUnavailable(f"模型文件缺失：{self.model_dir}（见 models/README.md）")
         self.sess = ort.InferenceSession(str(self.model_dir / "model.onnx"),
                                          providers=["CPUExecutionProvider"])
         self.tokenizer = Tokenizer.from_file(str(self.model_dir / "tokenizer.json"))
         self.max_len = 512
+        # pooling：mean（默认，向后兼容）/ cls（BGE 系列官方推荐，经 golden 实测校准后选定）
+        self.pooling = os.environ.get("MEMORY_ECOLOGY_EMBED_POOLING", "mean").strip().lower()
+        self._cache: dict[str, list[float]] = {}  # 文本→向量（门④两两比较同一正文会重复 embed）
 
     def embed(self, text: str) -> list[float]:
-        enc = self.tokenizer.encode((text or "")[:2000])
+        key = text or ""
+        hit = self._cache.get(key)
+        if hit is not None:
+            return hit
+        enc = self.tokenizer.encode(key[:2000])
         ids = enc.ids[:self.max_len]
         mask = [1] * len(ids)
         pad = self.max_len - len(ids)
@@ -100,15 +123,20 @@ class OnnxEmbedder:
             feeds.pop("token_type_ids", None)
             out = self.sess.run(None, feeds)
         vec = out[0][0]
-        # mean pooling（简化：取 [CLS] 或均值中较稳的均值；BGE 系列推荐 CLS，均值对短句近似）
+        # pooling：mean（默认）/ cls（BGE 官方推荐）。经 golden 实测校准后由
+        # MEMORY_ECOLOGY_EMBED_POOLING 选择；两者对短句差异小，长句 CLS 更稳。
         import numpy as _np  # onnxruntime 的输出是 numpy 数组——此处依赖必然已装
         v = _np.asarray(vec)
-        if v.ndim == 2:
+        if self.pooling == "cls" and v.ndim == 2:
+            v = v[0]
+        elif v.ndim == 2:
             m = _np.asarray(mask, dtype=float)[:, None]
             v = (v * m).sum(0) / max(m.sum(), 1.0)
         v = v.tolist()
         n = math.sqrt(sum(x * x for x in v)) or 1.0
-        return [x / n for x in v]
+        out_vec = [x / n for x in v]
+        self._cache[key] = out_vec
+        return out_vec
 
 
 class BackendUnavailable(RuntimeError):
@@ -116,13 +144,20 @@ class BackendUnavailable(RuntimeError):
 
 
 _EMBEDDER = None  # 惰性单例
+_EMBED_FAILED = False  # embedding 加载失败（缺依赖/缺模型）——缓存，避免每对重试
 
 
 def _get_embedder():
-    global _EMBEDDER
+    global _EMBEDDER, _EMBED_FAILED
     if _EMBEDDER is None:
-        _EMBEDDER = OnnxEmbedder(os.environ.get("MEMORY_ECOLOGY_EMBED_MODEL",
-                                                "bge-small-zh-v1.5"))
+        if _EMBED_FAILED:
+            raise BackendUnavailable("embedding 后端此前加载失败（见首次告警）")
+        try:
+            _EMBEDDER = OnnxEmbedder(os.environ.get("MEMORY_ECOLOGY_EMBED_MODEL",
+                                                    "bge-small-zh-v1.5"))
+        except BackendUnavailable:
+            _EMBED_FAILED = True
+            raise
     return _EMBEDDER
 
 
@@ -130,6 +165,52 @@ def _get_embedder():
 
 def backend_name() -> str:
     return os.environ.get("MEMORY_ECOLOGY_SIM_BACKEND", "difflib").strip().lower()
+
+
+# 门阈值后端映射（2026-10-04 用 golden 182 对实测迁移，见 scripts/migrate_thresholds.py）。
+# 迁移原则：保持旧 difflib 阈值的"操作点"（捕获率/误合并率）不变，只换刻度。
+# 键 = 门的语义角色；值 = {后端: 阈值}。difflib 列 = 旧值（行为锁定，校验用）。
+GATE_THRESHOLDS = {
+    # 门① 疑似窗口下界（漏=静默重复；误=多一次 LLM 调用，可容忍）→ 捕获 60% same∪similar
+    "suspect": {"difflib": 0.50, "ngram": 0.42, "embedding": 0.76},
+    # 门①③ 规则兜底合并（误合并=丢事实，不可逆）→ FPR=0 下最低阈值
+    "merge": {"difflib": 0.80, "ngram": 0.58, "embedding": 0.84},
+    # 门① 同文钳制 NOOP → 覆盖全部 difflib≥0.95 的对
+    "noop": {"difflib": 0.95, "ngram": 0.90, "embedding": 0.97},
+    # 门④ 合并候选清单（只出清单不执行，人工兜底）→ 召回 32% same
+    "candidate": {"difflib": 0.70, "ngram": 0.70, "embedding": 0.88},
+}
+
+
+def effective_backend() -> str:
+    """实际生效的后端：配置 embedding 但不可用时返回回退后的 "ngram"。
+
+    门阈值必须按"实际打分者"取——否则会出现"阈值按 embedding 校准、分数却来自
+    ngram 回退"的静默错配（比不换后端更危险）。故 gate_threshold 用本函数。
+    """
+    be = backend_name()
+    if be == "embedding":
+        try:
+            _get_embedder()
+        except BackendUnavailable:
+            return "ngram"
+    return be
+
+
+def gate_threshold(role: str, default: float) -> float:
+    """按当前生效后端取门阈值（role 见 GATE_THRESHOLDS）。未知 role/后端回 default。
+
+    门脚本一律经此取阈值——换后端时阈值自动跟随，杜绝"换内核忘改阈值"的静默漂移；
+    配置 embedding 但模型/依赖缺失时按回退后的 ngram 取值（与实际打分者一致）。
+    也可用环境变量 MEMORY_ECOLOGY_SIM_THRESHOLD_<ROLE> 显式覆盖（调试/微调用）。
+    """
+    ov = os.environ.get(f"MEMORY_ECOLOGY_SIM_THRESHOLD_{role.upper()}")
+    if ov:
+        try:
+            return float(ov)
+        except ValueError:
+            pass
+    return GATE_THRESHOLDS.get(role, {}).get(effective_backend(), default)
 
 
 def ratio(a: str, b: str) -> float:

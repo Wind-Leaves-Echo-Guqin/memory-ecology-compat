@@ -414,6 +414,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "entries": action_log_tail()})
         if api == "search":
             return self._json({"ok": True, **runner.search(one("kind") or "note", one("q"))})
+        if api == "retrieval":
+            # S4（v2.3.0）：检索质量（零结果率趋势），只读经 runner 调核心 CLI
+            try:
+                days = min(max(int(one("days") or "30"), 0), 365)
+            except ValueError:
+                days = 30
+            return self._json({"ok": True, **runner.retrieval_report(days)})
         if api == "firstaid":
             import first_aid
             return self._json({"ok": True, "result": first_aid.diagnose(fix=False)})

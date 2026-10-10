@@ -62,7 +62,7 @@ EXPIRY_THRESHOLDS = {
     '': 90,
 }
 DEFAULT_THRESHOLD = 90
-SIMILARITY_THRESHOLD = 0.70
+SIMILARITY_THRESHOLD = 0.70   # 门④合并候选（difflib 口径默认；实际经 gate_threshold 按后端迁移）
 QUARANTINE_DAYS = 90
 FULL_PAIRWISE_LIMIT = 300   # detail 文件数 ≤300 全量两两比较，>300 只比同 type
 
@@ -279,8 +279,12 @@ def apply_detail_actions(actions, archive_dir: Path, dry_run: bool) -> int:
 
 
 def find_merge_candidates(files):
-    """正文两两比较（difflib ratio≥0.7 且 slug 不同）。detail>300 文件只比同 type。"""
+    """正文两两比较（相似度 ≥ 门④阈值 且 slug 不同）。detail>300 文件只比同 type。
+
+    阈值经 similarity.gate_threshold('candidate') 按生效后端解析（difflib 口径 0.70）。
+    """
     candidates = []
+    threshold = similarity.gate_threshold("candidate", SIMILARITY_THRESHOLD)
     if len(files) <= FULL_PAIRWISE_LIMIT:
         groups = [files]
     else:
@@ -306,7 +310,7 @@ def find_merge_candidates(files):
                     continue
                 seen.add(key)
                 ratio = similarity.ratio(a['body'], b['body'])  # 批 5：统一相似度层
-                if ratio >= SIMILARITY_THRESHOLD:
+                if ratio >= threshold:
                     candidates.append({'a': a['slug'], 'b': b['slug'], 'ratio': ratio})
     candidates.sort(key=lambda c: (-c['ratio'], c['a'], c['b']))
     return candidates

@@ -19,7 +19,8 @@ DETAIL_TYPES = {"semantic", "episodic", "procedural", "lesson"}
 DETAIL_STATUS = {"active", "dormant", "superseded"}
 EXPERIENCE_TYPES = {"error", "pattern", "negative", "success", "link"}
 EXPERIENCE_STATUS = {"draft", "verified", "dormant", "superseded"}
-DATE_KEYS = ("first_seen", "last_seen", "valid_time", "last_verified", "last_hit", "created")
+DATE_KEYS = ("first_seen", "last_seen", "valid_time", "last_verified", "last_hit", "created",
+             "superseded_at", "distilled_at")
 COUNT_KEYS = ("occurrences", "session_count")
 
 

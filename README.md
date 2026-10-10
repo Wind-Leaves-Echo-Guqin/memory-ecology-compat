@@ -1,37 +1,34 @@
-# Memory Ecology Compat · 记忆生态·兼容版
+# 🧠 Memory Ecology Compat · 记忆生态
 
-多宿主（multi-host）的 agent 记忆与经验生态。源自 [memory-ecology](https://github.com/Wind-Leaves-Echo-Guqin/memory-ecology)（Hermes 版），
+**让 agent 不再每次会话都失忆。**
+
+`MIT` · `Python 3.10+` · `核心零依赖` · `纯本地` · `多宿主`
+
+> 多数记忆方案在解决「**怎么召回**」；
+> 我们解决它前面那层——「**记忆的生命周期怎么治理**」。
+
+源自 [memory-ecology](https://github.com/Wind-Leaves-Echo-Guqin/memory-ecology)（Hermes 版）。
 本仓库把**可移植核心**与**宿主适配层**分离，让 Hermes 之外的 agent（当前：dsh；规划：任意 CLI/MCP 宿主）
 复用同一套记忆生命周期治理与经验笔记本。
 
 > ⚠️ **当前边界（先读这段再用）**
 > 1. **检索是词面级的，不是语义检索**：默认后端 difflib（字符级子串 + 词面打分），召回依赖关键词选择。
+>    v2.3.0 起带时间维（三档半连续衰减 + `--since/--until/--window` 发生时间过滤）与
+>    **零结果率观测**（`eco_retrieval_report.py` / GUI「检索质量」页签——换内核的在线证据）。
+>    v2.4.0 起多词查询有 **OR 召回兜底**（`--recall`：AND 全中之外补部分命中，RRF 融合排序；
+>    默认关闭）与**向量检索路**（`--semantic`：本地向量缓存 shadow index，余弦排序；默认关闭）。
 >    本地 embedding（`bge-small-zh-v1.5` + CLS pooling，golden 182 对 AUC 0.93 vs difflib 0.90）为
 >    **可选后端，尚未默认启用**——选型依据与启用方式见 [models/README.md](models/README.md)、
 >    `lib/similarity.py` 与 ARCHITECTURE_TODO §三。
 > 2. **经验笔记本是半自动线**：signals/merge/gold 只标记不判定，成熟/合并需人工兜底，
->    详见「系统构成：两条纪律线」。
+>    详见「🎯 它是什么」的两条纪律线对照。
 > 3. **Status: 🚧 Work in Progress**（2026-10-04 全量审计后进入收敛期）；
 >    已知问题与架构待办见 [ARCHITECTURE_TODO.md](ARCHITECTURE_TODO.md)。
 
 > 派生声明：本项目为原 memory-ecology（Hermes 单宿主版）的兼容衍生线，独立仓库、独立演进；
-> 自 v2.1.2 起**版本号同步**（当前 v2.2.5）；compat = 治理核心（四道门）＋检索消费端，
+> 自 v2.1.2 起**版本号同步**（当前 **v2.4.0**）；compat = 治理核心（四道门）＋检索消费端，
 > 捕获链（信号/提取/回填）为宿主树专属，移植路线见 ARCHITECTURE_TODO.md 第四节；
 > 本线只多出「多宿主化 + 观测舱 GUI」这一集成层。
-
-## 系统构成：两条纪律线
-
-本系统由两条设计哲学不同的线构成（此前 README 统称"四道门+经验笔记本"，易误读为同质系统）：
-
-| | 自动治理线（四道门） | 半自动沉淀线（经验笔记本） |
-|---|---|---|
-| 目标 | 自动化运转（提升/挤出/蒸馏/复核） | 低置信度标记 + 人工兜底 |
-| 追求 | 可逆、幂等、稳态（防震荡） | 可观测、可追溯、零误伤 |
-| 边界 | 只出合并/复活**候选**，不自动裁决 | signals/merge/gold 均只标记不判定 |
-
-**定位澄清**：`eco_health_check.py` 检查的是 skills/ 生态（frontmatter 合法性、引用图、cron 健康），
-**不是**四道门的运行状态仪表盘；门级运行状态看各自 gate_log/distill_log/review_log 与 idle 心跳。
-`memory_query.py` 是记忆（detail+archive）的检索入口。
 
 ## English TL;DR
 
@@ -48,51 +45,36 @@ feature-identical and version-aligned — this repo only adds the multi-host lay
 semantic embedding is an optional, not-yet-default backend), and the experience notebook only *flags*:
 maturation and merging keep a human in the loop. MIT licensed.
 
-## 兼容性说明（本仓库兼容了什么）
+## 🎯 它是什么
 
-「兼容」的不是某一个产品，而是「任何 agent 宿主」——三层含义：
-
-| 层 | 兼容对象 | 说明 |
-|---|---|---|
-| **可移植核心** | 任意能 spawn Python 子进程的宿主 | `src/memory_ecology`（四道门 + 经验笔记本 + 评测门禁）零宿主依赖，CLI / 脚本 / MCP 封装均可直接调用 |
-| **Hermes 适配层** | 上游 [memory-ecology](https://github.com/Wind-Leaves-Echo-Guqin/memory-ecology) 的宿主（参考实现全套） | `integrations/hermes/`：state.db 会话增量提取、pre_llm_call 报错注入 hook、cron 健康告警、基因库快照 |
-| **dsh 适配层** | dsh 双插件体系 | `integrations/dsh/`：`package/`＝EAC 变体（Extension SDK `provideContext`/`registerTool`）；`package-cordis/`＝官方桌面版（cordis patch 层 `agent/pre-step` 注入 + `ctx.tools.register`）——均只读 + fail-open，报错根因注入 + `eco_note_query` / `eco_note_error_query` 原生只读工具 |
-| **观测舱 GUI** | 人类（本机浏览器 / pywebview 原生窗口） | `integrations/gui/`：本地可视化驾驶舱（只读观测 + 走确认闸门的写操作），数据根同上，仅绑 127.0.0.1 |
-| **共享数据根** | 多宿主并存 | 多宿主经 `MEMORY_ECOLOGY_ROOT` 指向同一条数据根即可共享记忆与经验；**单写入方纪律**保证四道门只有一个调度器 |
-
-**适配新宿主**：照 `integrations/` 现有模式写薄壳（每回合 hook → subprocess 调检索 CLI → 拼注入文本），
-核心零改动；接入步骤见根 README「快速开始」与 `integrations/dsh/README.md`。
-
-## 它解决什么问题
+把 agent 的记忆当成一个**生态系统**：有界、可逆、可追溯。
 
 agent 的记忆通常"只进不出、写入靠自觉、超限不可见"。本生态用**四道门**治理记忆生命周期，
 用**经验笔记本**沉淀"做事经验"（错误/成功/已验证链路）——规则驱动为主、可回滚：
-四道门自动运转零维护，LLM 仅参与门①相似/矛盾终审与门③措辞，其余环节零 LLM、离线可用：
+四道门自动运转零维护，LLM 仅参与门①相似/矛盾终审与门③措辞，其余环节零 LLM、离线可用。
 
-- 门① 写入整合（`write_gate.py`）：类型分型 + 相似合并 + 矛盾失效（superseded 进隔离区，永不物理删除；相似/矛盾判定 LLM 终审，规则兜底）
-- 门② 巩固/配额（`eco_quota.py`）：L1 常驻层挤出/提升，配额恒有界（纯规则，零 LLM）
-- 门③ 蒸馏（`distill_stage.py`）：L2 稳定事实 → 用户画像（规则判稳，LLM 只措辞）
-- 门④ 复核（`eco_review.py`）：遗忘曲线，超期复核 → dormant → archive（可逆）
-- 经验笔记本（`eco_note_*`）：信号捕获 → 候选区 → 按需检索（不常驻注入）→ 成熟蒸馏为技能（**只标记不判定**，成熟/合并人工兜底）
+系统由两条设计哲学不同的线构成（此前统称"四道门+经验笔记本"，易误读为同质系统）：
 
-## 架构总览
+| | 自动治理线（四道门） | 半自动沉淀线（经验笔记本） |
+|---|---|---|
+| 目标 | 自动化运转（提升/挤出/蒸馏/复核） | 低置信度标记 + 人工兜底 |
+| 追求 | 可逆、幂等、稳态（防震荡） | 可观测、可追溯、零误伤 |
+| 边界 | 只出合并/复活**候选**，不自动裁决 | signals/merge/gold 均只标记不判定 |
 
-```
-宿主层    Hermes │ dsh(EAC / cordis) │ 观测舱 GUI │ …任何能 spawn Python 子进程的宿主
-          integrations/ 薄适配层：只读检索 + 向 pending/ 追加候选（宿主不直接写记忆）
-                           │
-                           ▼
-数据根    MEMORY_ECOLOGY_ROOT：memories/ · experiences/ · pending/ · 门日志
-                           ▲
-                           │ 读写仅限唯一调度器（单写入方纪律）
-                           │
-治理核心   src/memory_ecology（零宿主依赖，规则驱动为主）
-          ├─ 四道门     ① 写入整合 → ② 巩固/配额 → ③ 蒸馏 → ④ 复核
-          ├─ 经验笔记本  信号捕获 → 候选区 → 按需检索 → 人工兜底 → 技能
-          └─ 检索消费端  memory_query / eco_note_query
-```
+**四道门**（规则驱动为主，LLM 只参与门①终审与门③措辞）：
 
-## 和「向量 RAG / Mem0 式记忆」的区别
+- **门① 写入整合**（`write_gate.py`）：类型分型 + 相似合并 + 矛盾失效（superseded 进隔离区，永不物理删除；相似/矛盾判定 LLM 终审，规则兜底）。v2.3.0：失效带理由与日期（superseded_reason/superseded_at）——隔离区变可查历史时间轴；换代新条目与被取代旧条目 evidence/superseded_by **互指**
+- **门② 巩固/配额**（`eco_quota.py`）：L1 常驻层挤出/提升，配额恒有界（纯规则，零 LLM）
+- **门③ 蒸馏**（`distill_stage.py`）：L2 稳定事实 → 用户画像（规则判稳，LLM 只措辞）。v2.3.0：候选落盘登记源条目 distilled_at，源失效/复活清空 → 可重蒸馏
+- **门④ 复核**（`eco_review.py`）：遗忘曲线，超期复核 → dormant → archive（可逆）
+- **经验笔记本**（`eco_note_*`）：信号捕获 → 候选区 → 按需检索（不常驻注入）→ 成熟蒸馏为技能（**只标记不判定**，成熟/合并人工兜底）
+- **检索消费端**（`memory_query.py`）：三档半连续时间衰减 + 发生时间过滤（--since/--until/--window）+ 失效理由随命中返回（v2.3.0）；OR 召回 `--recall`（RRF 融合）与向量检索 `--semantic`（`lib/vector_cache.py` shadow index，可丢弃缓存）（v2.4.0，均默认关闭）；`eco_retrieval_report.py` 零结果率观测（GUI「检索质量」页签）
+
+**定位澄清**：`eco_health_check.py` 检查的是 skills/ 生态（frontmatter 合法性、引用图、cron 健康），
+**不是**四道门的运行状态仪表盘；门级运行状态看各自 gate_log/distill_log/review_log 与 idle 心跳。
+`memory_query.py` 是记忆（detail+archive）的检索入口。
+
+## 🔀 为什么不一样
 
 多数记忆方案回答的核心问题是「**怎么召回**」（embedding → 向量库 → 检索拼接）；本项目的重心在它
 前面的一层：「**记忆的生命周期怎么治理**」——写入、合并、挤出、蒸馏、遗忘、复核，检索只是治理
@@ -110,18 +92,24 @@ agent 的记忆通常"只进不出、写入靠自觉、超限不可见"。本生
 > 简化对比，仅供定位：各家方案均在演进，以官方文档为准。另注意本项目的检索当前为词面级
 > （见顶部「当前边界」），召回质量不是它的卖点——生命周期治理才是。
 
-## 仓库结构
+## 🏗 架构总览
 
 ```
-src/memory_ecology/     可移植核心（Python ≥3.10，零宿主依赖）
-  ├── 四道门 + eco_note 可移植件 + lib/（config/fs/llm）
-  └── test_*.py（fixture 隔离测试）
-integrations/hermes/    Hermes 参考集成层（state.db/cron 耦合件，适配器参考实现）
-integrations/dsh/       dsh 适配器（package/＝EAC Extension SDK；package-cordis/＝官方桌面版 cordis）
-integrations/gui/       观测舱 GUI（可选：人类宿主适配器，本地可视化驾驶舱）
+宿主层    Hermes │ dsh(EAC / cordis) │ 观测舱 GUI │ …任何能 spawn Python 子进程的宿主
+          integrations/ 薄适配层：只读检索 + 向 pending/ 追加候选（宿主不直接写记忆）
+                           │
+                           ▼
+数据根    MEMORY_ECOLOGY_ROOT：memories/ · experiences/ · pending/ · 门日志
+                           ▲
+                           │ 读写仅限唯一调度器（单写入方纪律）
+                           │
+治理核心   src/memory_ecology（零宿主依赖，规则驱动为主）
+          ├─ 四道门     ① 写入整合 → ② 巩固/配额 → ③ 蒸馏 → ④ 复核
+          ├─ 经验笔记本  信号捕获 → 候选区 → 按需检索 → 人工兜底 → 技能
+          └─ 检索消费端  memory_query / eco_note_query
 ```
 
-## 快速开始
+## 🚀 30 秒上手
 
 ### 1) 只用核心 CLI（任何宿主/无宿主）
 
@@ -175,21 +163,56 @@ python integrations/gui/install_desktop.py
 写操作全部走确认闸门并转交核心 CLI 执行。
 Hermes 专属动作（cron 重跑等）在未安装 Hermes 的机器上会降级为"可复制命令"。
 
-## 多宿主纪律（重要）
+## 🧩 兼容什么
 
-- **单写入方**：四道门/捕获管线只允许一个调度器（一个宿主）执行；
-  其他宿主只读消费 + 向 `pending/` 追加带宿主前缀的候选（如 `dsh-<date>.md`）
-- **共享数据根**：多宿主共用一条根时经 `MEMORY_ECOLOGY_ROOT` 指向同一路径；
-  隔离模式则各配各的根
-- 一切动作可回滚：数据根建议纳入 git（基因库模式），删除永远代码层禁用
+「兼容」的不是某一个产品，而是「任何 agent 宿主」——三层含义：
 
-## 测试
+| 层 | 兼容对象 | 说明 |
+|---|---|---|
+| **可移植核心** | 任意能 spawn Python 子进程的宿主 | `src/memory_ecology`（四道门 + 经验笔记本 + 评测门禁）零宿主依赖，CLI / 脚本 / MCP 封装均可直接调用 |
+| **Hermes 适配层** | 上游 [memory-ecology](https://github.com/Wind-Leaves-Echo-Guqin/memory-ecology) 的宿主（参考实现全套） | `integrations/hermes/`：state.db 会话增量提取、pre_llm_call 报错注入 hook、cron 健康告警、基因库快照 |
+| **dsh 适配层** | dsh 双插件体系 | `integrations/dsh/`：`package/`＝EAC 变体（Extension SDK `provideContext`/`registerTool`）；`package-cordis/`＝官方桌面版（cordis patch 层 `agent/pre-step` 注入 + `ctx.tools.register`）——均只读 + fail-open，报错根因注入 + `eco_note_query` / `eco_note_error_query` 原生只读工具 |
+| **观测舱 GUI** | 人类（本机浏览器 / pywebview 原生窗口） | `integrations/gui/`：本地可视化驾驶舱（只读观测 + 走确认闸门的写操作），数据根同上，仅绑 127.0.0.1 |
+| **共享数据根** | 多宿主并存 | 多宿主经 `MEMORY_ECOLOGY_ROOT` 指向同一条数据根即可共享记忆与经验；**单写入方纪律**保证四道门只有一个调度器 |
+
+**适配新宿主**：照 `integrations/` 现有模式写薄壳（每回合 hook → subprocess 调检索 CLI → 拼注入文本），
+核心零改动；接入步骤见根 README「快速开始」与 `integrations/dsh/README.md`。
+
+## 📦 仓库结构
+
+```
+src/memory_ecology/     可移植核心（Python ≥3.10，零宿主依赖）
+  ├── 四道门 + eco_note 可移植件 + lib/（config/fs/llm/memstore/gatekit/safeio/metrics…）
+  ├── golden/           相似度 golden 评测集
+  └── test_*.py（fixture 隔离测试）
+models/                 本地 embedding 权重（bge-small/base/large-zh-v1.5 + text2vec；按需 fetch，不入库）
+integrations/hermes/    Hermes 参考集成层（state.db/cron 耦合件，适配器参考实现）
+integrations/dsh/       dsh 适配器（package/＝EAC Extension SDK；package-cordis/＝官方桌面版 cordis）
+integrations/gui/       观测舱 GUI（可选：人类宿主适配器，本地可视化驾驶舱）
+tools/                  sync_trees_check.py（双树漂移比对）
+PROJECT-MAP/            分层项目地图（00 意图总览 → 01 架构 → 02 模块 → 03 运维）
+scripts/                发布树为空（工具层在 dev 树；此处仅占位）
+```
+
+## ✅ 测试
 
 ```bash
 cd src/memory_ecology
 python test_eco_gates.py              # 四门持久化回归
 python test_eco_note_error_query_v2.py  # 根因分层回归
 python test_eco_version.py            # 健康行口径回归
+python test_memory_query_time.py      # S1 时间维检索回归（v2.3.0）
+python test_write_gate_conflict_tri.py  # S2 失效理由回归（v2.3.0）
+python test_evidence_chain.py         # S3 证据链回归（v2.3.0）
+python test_retrieval_report.py       # S4 零结果率观测回归（v2.3.0）
+python test_vector_cache.py           # S6 向量缓存 shadow index 回归（v2.4.0）
+python test_recall_rrf.py             # S7 OR 召回 + RRF 融合回归（v2.4.0）
+python test_p0_fixes.py               # P0 修复回归
+python test_p1_fixes.py               # P1 修复回归
+python test_p05_demand.py             # 按需检索回归
+python test_safeio.py                 # 安全写路径回归
+python test_similarity.py             # 相似度后端回归
+python test_eco_eval_v22.py           # 评测门禁回归
 
 # dsh 适配器（cwd=integrations/dsh；v2.2.5 起三件）
 cd ../../integrations/dsh
@@ -201,6 +224,6 @@ python package/python/test_eco_note_dsh_context_v4.py  # v4 结构化扫描 / �
 ```
 （以上测试缺 python 或 zstandard 时会**显式失败**而不是静默跳过——它们是 v2.2.5 关键护栏。）
 
-## License
+## 📄 License
 
 MIT © 2026 Wind-Leaves-Echo-Guqin（沿用上游 memory-ecology 许可）

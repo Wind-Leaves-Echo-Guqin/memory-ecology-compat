@@ -6,3 +6,13 @@ experiences/
 *.db
 .env
 .dsh_inject_state*.json
+# embedding 模型权重（数百 MB~GB，走 fetch_embed_models.py 按需拉取，不入库）
+# 只忽略权重目录，保留 models/README.md（选型结论文档）
+models/*/
+models/*.onnx
+models/*.json
+!models/README.md
+# 评测中间产物（候选对/对比明细，可重生成）
+**/golden/_*.json
+# 内部项目地图（含本机路径/开发树名，不对外发布）
+PROJECT-MAP/
